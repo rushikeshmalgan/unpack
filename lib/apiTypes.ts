@@ -1,6 +1,18 @@
 import type { NormalizedContent } from "@/lib/content/types";
 import type { AnalysisResult } from "@/lib/schemas/analysisResult";
 import type { ExplainResult } from "@/lib/schemas/explainResult";
+import type { PipelineResult, EvidencePanel } from "@/lib/schemas/pipeline/response";
+
+export type UnpackResponse =
+  | { success: true; status: "ok"; result: PipelineResult }
+  | { success: true; status: "insufficient"; ingestion: { status: string; missing: string[] } }
+  | {
+      success: true;
+      status: "ai_error";
+      error: { code: string; message: string };
+      evidencePanel: EvidencePanel;
+    }
+  | { success: false; error: { code: string; message: string } };
 
 export type RetrievalStatus = "retrieved" | "blocked_or_private" | "unreachable" | "timeout" | "no_data";
 

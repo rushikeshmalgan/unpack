@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   formatActionItems,
+  formatAllLinks,
   formatFullAnalysis,
   formatKeyTakeaways,
+  formatLinks,
   formatResources,
   formatWhatShouldIDo,
 } from "@/lib/clipboardFormat";
+import type { PipelineResult, LinkResult } from "@/lib/schemas/pipeline/response";
 import type { AnalysisResult } from "@/lib/schemas/analysisResult";
 import type { NormalizedContent } from "@/lib/content/types";
 
@@ -113,5 +116,53 @@ describe("formatFullAnalysis", () => {
     const text = formatFullAnalysis(content, fixtureAnalysis());
     expect(text).toContain("LINKS FOUND");
     expect(text).toContain("https://github.com/someuser");
+  });
+});
+
+function link(overrides: Partial<LinkResult> = {}): LinkResult {
+  return { title: "Excalidraw", url: "https://excalidraw.com", source: "excalidraw.com", reason: "match", confidence: "high", ...overrides };
+}
+
+function fixturePipelineResult(overrides: Partial<PipelineResult> = {}): PipelineResult {
+  return {
+    reel: { url: "https://www.instagram.com/reel/abc/", creator: "someuser", captionPreview: "caption", reelType: "recommendation_list" },
+    creatorPromise: null,
+    results: [{ pointerId: "p1", kind: "explicit", resourceType: "web_tool", name: "Excalidraw", links: [link()] }],
+    creatorOwned: [],
+    explore: null,
+    unresolved: [],
+    evidencePanel: { caption: "caption", transcriptSnippets: [], onScreenText: [], comments: [] },
+    warnings: [],
+    ingestion: { status: "manual_only", missing: [] },
+    ...overrides,
+  };
+}
+
+describe("formatLinks", () => {
+  it("formats a title+url bullet list", () => {
+    expect(formatLinks([link(), link({ title: "GitHub", url: "https://github.com/x" })])).toBe(
+      "- Excalidraw: https://excalidraw.com\n- GitHub: https://github.com/x",
+    );
+  });
+});
+
+describe("formatAllLinks", () => {
+  it("includes pointer results, creator-owned alternatives, and explore links", () => {
+    const result = fixturePipelineResult({
+      creatorOwned: [{ name: "my PDF", note: "gated", alternatives: [link({ title: "Alt", url: "https://alt.com" })] }],
+      explore: [link({ title: "Related", url: "https://related.com" })],
+    });
+    const text = formatAllLinks(result);
+    expect(text).toContain("https://excalidraw.com");
+    expect(text).toContain("https://alt.com");
+    expect(text).toContain("https://related.com");
+  });
+
+  it("skips creator-owned entries with no alternatives", () => {
+    const result = fixturePipelineResult({
+      results: [],
+      creatorOwned: [{ name: "my PDF", note: "gated", alternatives: [] }],
+    });
+    expect(formatAllLinks(result)).toBe("");
   });
 });

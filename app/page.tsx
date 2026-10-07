@@ -6,10 +6,10 @@ export default function Home() {
       <main className="w-full max-w-2xl">
         <div className="text-center">
           <h1 className="text-3xl font-semibold tracking-tight text-foreground sm:text-4xl">
-            Turn a Reel into useful information.
+            Turn a Reel into the real links.
           </h1>
           <p className="mt-3 text-base text-muted-foreground">
-            Paste the Instagram Reel or Post link.
+            No commenting, no following, no waiting for a DM.
           </p>
         </div>
 

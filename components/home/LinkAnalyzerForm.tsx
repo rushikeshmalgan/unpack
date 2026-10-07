@@ -10,13 +10,14 @@ import {
   describeUrlError,
   validateInstagramUrl,
 } from "@/lib/validation";
-import type { AnalyzeResponse } from "@/lib/apiTypes";
-import { AnalysisResult } from "@/components/home/AnalysisResult";
+import type { UnpackResponse } from "@/lib/apiTypes";
+import { ResultsView } from "@/components/home/ResultsView";
 
 type FormPhase = "form" | "loading";
-type SuccessResult = Extract<AnalyzeResponse, { success: true }>;
+type Mode = "exact" | "explore";
+type SuccessResult = Extract<UnpackResponse, { success: true; status: "ok" }>;
 
-function describeFailure(res: Response, data: AnalyzeResponse): string {
+function describeFailure(res: Response, data: UnpackResponse): string {
   if (res.status === 429) return "Too many requests — please wait a moment and try again.";
   if (!data.success && data.error) return data.error.message;
   return "Something went wrong. Please try again.";
@@ -26,17 +27,21 @@ export function LinkAnalyzerForm() {
   const [url, setUrl] = useState("");
   const [caption, setCaption] = useState("");
   const [transcript, setTranscript] = useState("");
+  const [comments, setComments] = useState("");
+  const [onScreenText, setOnScreenText] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [fieldError, setFieldError] = useState<string | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
   const [insufficientNotice, setInsufficientNotice] = useState(false);
+  const [degradedNotice, setDegradedNotice] = useState<string | null>(null);
   const [loadingStage, setLoadingStage] = useState<string>("");
   const [phase, setPhase] = useState<FormPhase>("form");
+  const [mode, setMode] = useState<Mode>("exact");
   const [result, setResult] = useState<SuccessResult | null>(null);
   const [reanalyzing, setReanalyzing] = useState(false);
   const [reanalyzeError, setReanalyzeError] = useState<string | null>(null);
 
-  async function requestAnalysis() {
+  async function requestUnpack(requestMode: Mode) {
     const res = await fetch("/api/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -44,9 +49,12 @@ export function LinkAnalyzerForm() {
         url,
         caption: caption.trim() || undefined,
         transcript: transcript.trim() || undefined,
+        comments: comments.trim() || undefined,
+        onScreenText: onScreenText.trim() || undefined,
+        mode: requestMode,
       }),
     });
-    const data: AnalyzeResponse = await res.json();
+    const data: UnpackResponse = await res.json();
     return { res, data };
   }
 
@@ -62,12 +70,14 @@ export function LinkAnalyzerForm() {
     setFieldError(null);
     setRequestError(null);
     setInsufficientNotice(false);
+    setDegradedNotice(null);
     setPhase("loading");
-    setLoadingStage("Retrieving available content…");
-    const stageTimer = window.setTimeout(() => setLoadingStage("Analyzing with AI…"), 900);
+    setLoadingStage("Reading reel…");
+    const stage2 = window.setTimeout(() => setLoadingStage("Understanding…"), 1200);
+    const stage3 = window.setTimeout(() => setLoadingStage("Searching for real links…"), 4000);
 
     try {
-      const { res, data } = await requestAnalysis();
+      const { res, data } = await requestUnpack(mode);
 
       if (!res.ok || !data.success) {
         setRequestError(describeFailure(res, data));
@@ -75,9 +85,15 @@ export function LinkAnalyzerForm() {
         return;
       }
 
-      if (!data.sufficientContent) {
+      if (data.status === "insufficient") {
         setInsufficientNotice(true);
         setShowAdvanced(true);
+        setPhase("form");
+        return;
+      }
+
+      if (data.status === "ai_error") {
+        setDegradedNotice(data.error.message);
         setPhase("form");
         return;
       }
@@ -87,26 +103,24 @@ export function LinkAnalyzerForm() {
       setRequestError("We couldn't reach the server. Check your connection and try again.");
       setPhase("form");
     } finally {
-      window.clearTimeout(stageTimer);
+      window.clearTimeout(stage2);
+      window.clearTimeout(stage3);
     }
   }
 
-  async function handleReanalyze() {
+  async function runWithMode(requestMode: Mode) {
     setReanalyzing(true);
     setReanalyzeError(null);
 
     try {
-      const { res, data } = await requestAnalysis();
+      const { res, data } = await requestUnpack(requestMode);
 
-      if (!res.ok || !data.success) {
-        setReanalyzeError(describeFailure(res, data));
-        return;
-      }
-      if (!data.sufficientContent) {
-        setReanalyzeError("That link no longer has enough content to analyze.");
+      if (!res.ok || !data.success || data.status !== "ok") {
+        setReanalyzeError(!res.ok || !data.success ? describeFailure(res, data) : "Couldn't switch modes right now.");
         return;
       }
 
+      setMode(requestMode);
       setResult(data);
     } catch {
       setReanalyzeError("We couldn't reach the server. Check your connection and try again.");
@@ -115,26 +129,37 @@ export function LinkAnalyzerForm() {
     }
   }
 
+  function handleReanalyze() {
+    void runWithMode(mode);
+  }
+
+  function handleToggleExplore() {
+    void runWithMode(mode === "exact" ? "explore" : "exact");
+  }
+
   function handleReset() {
     setUrl("");
     setCaption("");
     setTranscript("");
+    setComments("");
+    setOnScreenText("");
     setShowAdvanced(false);
     setFieldError(null);
     setRequestError(null);
     setInsufficientNotice(false);
+    setDegradedNotice(null);
     setPhase("form");
+    setMode("exact");
     setResult(null);
     setReanalyzeError(null);
   }
 
   if (result) {
     return (
-      <AnalysisResult
-        content={result.content}
-        analysis={result.analysis}
-        retrieval={result.retrieval}
-        aiError={result.aiError}
+      <ResultsView
+        result={result.result}
+        mode={mode}
+        onToggleExplore={handleToggleExplore}
         onReanalyze={handleReanalyze}
         onReset={handleReset}
         reanalyzing={reanalyzing}
@@ -167,7 +192,7 @@ export function LinkAnalyzerForm() {
           />
         </div>
         <Button type="submit" disabled={phase === "loading"} className="sm:w-auto">
-          {phase === "loading" ? loadingStage || "Analyzing…" : "Analyze"}
+          {phase === "loading" ? loadingStage || "Finding links…" : "Find the links"}
         </Button>
       </div>
 
@@ -184,14 +209,20 @@ export function LinkAnalyzerForm() {
       )}
 
       <p className="mt-3 text-sm text-muted-foreground">
-        Understand the content, extract the useful stuff, and see what the creator is asking you
-        to do.
+        We work out what the reel points to — videos, tools, repos, books, places, and more —
+        and find the real links. No following, no commenting, no waiting for a DM.
       </p>
 
       {insufficientNotice && (
         <div className="mt-4 rounded-lg border border-notice-border bg-notice-bg px-4 py-3 text-sm text-notice">
-          We couldn&apos;t retrieve enough information from this Instagram post to fully analyze
-          it. Paste the caption or transcript below, then analyze again.
+          We couldn&apos;t retrieve enough information from this Instagram post. Paste the
+          caption, transcript, or on-screen text below, then try again.
+        </div>
+      )}
+
+      {degradedNotice && (
+        <div className="mt-4 rounded-lg border border-danger-border bg-danger-bg px-4 py-3 text-sm text-danger">
+          {degradedNotice}
         </div>
       )}
 
@@ -202,14 +233,14 @@ export function LinkAnalyzerForm() {
           className="rounded text-sm font-medium text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           aria-expanded={showAdvanced}
         >
-          {showAdvanced ? "− Hide deeper analysis options" : "+ Need a deeper analysis?"}
+          {showAdvanced ? "− Hide manual input" : "+ Paste caption / transcript / comments"}
         </button>
 
         {showAdvanced && (
           <div className="mt-4 flex flex-col gap-4 rounded-xl border border-border bg-surface p-4">
             <p className="text-sm text-muted-foreground">
-              Instagram often doesn&apos;t expose a Reel&apos;s full caption or transcript
-              publicly. Paste either below to get a deeper analysis.
+              Instagram often doesn&apos;t expose a Reel&apos;s caption, spoken words, or on-screen
+              text publicly — paste what you can below for better results.
             </p>
             <div>
               <label htmlFor="ig-caption" className="mb-1 block text-sm font-medium">
@@ -223,9 +254,6 @@ export function LinkAnalyzerForm() {
                 value={caption}
                 onChange={(e) => setCaption(e.target.value)}
               />
-              <p className="mt-1 text-right text-xs text-muted-foreground">
-                {caption.length}/{MAX_CAPTION_LENGTH}
-              </p>
             </div>
             <div>
               <label htmlFor="ig-transcript" className="mb-1 block text-sm font-medium">
@@ -233,15 +261,38 @@ export function LinkAnalyzerForm() {
               </label>
               <Textarea
                 id="ig-transcript"
-                rows={4}
+                rows={3}
                 maxLength={MAX_TRANSCRIPT_LENGTH}
-                placeholder="Paste the spoken transcript or on-screen text…"
+                placeholder="Paste the spoken transcript…"
                 value={transcript}
                 onChange={(e) => setTranscript(e.target.value)}
               />
-              <p className="mt-1 text-right text-xs text-muted-foreground">
-                {transcript.length}/{MAX_TRANSCRIPT_LENGTH}
-              </p>
+            </div>
+            <div>
+              <label htmlFor="ig-onscreen" className="mb-1 block text-sm font-medium">
+                On-screen text
+              </label>
+              <Textarea
+                id="ig-onscreen"
+                rows={2}
+                maxLength={MAX_CAPTION_LENGTH}
+                placeholder="Any titles, names, or URLs shown on screen…"
+                value={onScreenText}
+                onChange={(e) => setOnScreenText(e.target.value)}
+              />
+            </div>
+            <div>
+              <label htmlFor="ig-comments" className="mb-1 block text-sm font-medium">
+                Top comments
+              </label>
+              <Textarea
+                id="ig-comments"
+                rows={2}
+                maxLength={MAX_CAPTION_LENGTH}
+                placeholder="Pinned or top comments, if they mention the links…"
+                value={comments}
+                onChange={(e) => setComments(e.target.value)}
+              />
             </div>
           </div>
         )}

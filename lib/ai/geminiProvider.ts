@@ -115,7 +115,10 @@ async function callWithBoundedRetry(
   }
 }
 
-async function generateStructured<T>(
+// Exported so other pipeline stages (e.g. the resource-finder pipeline's
+// understanding/verification steps) can reuse the same retry/timeout/quota
+// classification without duplicating it against a different schema.
+export async function generateStructured<T>(
   schema: z.ZodType<T>,
   jsonSchema: unknown,
   systemInstruction: string,

@@ -1,5 +1,6 @@
 import type { NormalizedContent } from "@/lib/content/types";
 import type { AnalysisResult } from "@/lib/schemas/analysisResult";
+import type { PipelineResult, LinkResult } from "@/lib/schemas/pipeline/response";
 
 export function formatKeyTakeaways(analysis: AnalysisResult): string {
   return analysis.keyTakeaways.map((t) => `- ${t}`).join("\n");
@@ -86,3 +87,31 @@ export function formatFullAnalysis(content: NormalizedContent, analysis: Analysi
 
   return lines.join("\n").trim();
 }
+
+// --- Pipeline (resource-finder) formatting ---
+
+export function formatLinks(links: LinkResult[]): string {
+  return links.map((l) => `- ${l.title}: ${l.url}`).join("\n");
+}
+
+export function formatAllLinks(result: PipelineResult): string {
+  const lines: string[] = [];
+  for (const r of result.results) {
+    lines.push(r.name);
+    lines.push(formatLinks(r.links));
+    lines.push("");
+  }
+  for (const c of result.creatorOwned) {
+    if (c.alternatives.length > 0) {
+      lines.push(`${c.name} (creator-owned — alternatives)`);
+      lines.push(formatLinks(c.alternatives));
+      lines.push("");
+    }
+  }
+  if (result.explore && result.explore.length > 0) {
+    lines.push("Related to this reel's topic");
+    lines.push(formatLinks(result.explore));
+  }
+  return lines.join("\n").trim();
+}
+

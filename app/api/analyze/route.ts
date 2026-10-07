@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { analyzeRequestSchema } from "@/lib/schemas/analyzeRequest";
-import { retrieveContent } from "@/lib/content/retrieveContent";
+import { unpackRequestSchema } from "@/lib/schemas/pipeline/request";
+import { runPipeline } from "@/lib/pipeline/pipeline";
 import { enforceRateLimit } from "@/lib/rateLimit/enforce";
-import { getAIProvider } from "@/lib/ai/getProvider";
 import { toApiError } from "@/lib/ai/providerError";
 import { isBodyTooLarge } from "@/lib/requestGuard";
 
 export const runtime = "nodejs";
 // Worst case through generateStructured is ~45s (3 Gemini attempts x 15s each,
-// see geminiProvider.ts). 60s gives headroom without relying on platform
+// see geminiProvider.ts), plus resolver fan-out (each capped at 8-10s, run
+// with bounded concurrency). 60s gives headroom without relying on platform
 // defaults we can't fully verify for every account configuration.
 export const maxDuration = 60;
 
@@ -33,7 +33,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const parsed = analyzeRequestSchema.safeParse(rawBody);
+  const parsed = unpackRequestSchema.safeParse(rawBody);
   if (!parsed.success) {
     return NextResponse.json(
       { success: false, error: { code: "bad_request", message: "Invalid request." } },
@@ -42,7 +42,18 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const outcome = await retrieveContent(parsed.data);
+    const outcome = await runPipeline({
+      url: parsed.data.url,
+      manual: {
+        caption: parsed.data.caption,
+        transcript: parsed.data.transcript,
+        comments: parsed.data.comments,
+        onScreenText: parsed.data.onScreenText,
+        bioLink: parsed.data.bioLink,
+      },
+      mode: parsed.data.mode,
+      locale: parsed.data.locale,
+    });
 
     if (outcome.status === "invalid_url") {
       return NextResponse.json(
@@ -51,30 +62,30 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!outcome.sufficient) {
+    if (outcome.status === "insufficient") {
       return NextResponse.json({
         success: true,
-        content: outcome.content,
-        sufficientContent: false,
-        retrieval: outcome.retrieval,
-        analysis: null,
-        aiError: null,
+        status: "insufficient",
+        ingestion: { status: outcome.signals.status, missing: outcome.signals.missing },
       });
     }
 
-    const aiOutcome = await getAIProvider().analyze(outcome.content);
-    if (!aiOutcome.ok) {
-      console.error("[api/analyze] AI analysis failed:", aiOutcome.error.type);
+    if (outcome.status === "ai_error") {
+      console.error("[api/analyze] AI understanding failed:", outcome.error.type);
+      return NextResponse.json({
+        success: true,
+        status: "ai_error",
+        error: toApiError(outcome.error),
+        evidencePanel: {
+          caption: outcome.signals.caption,
+          transcriptSnippets: outcome.signals.transcript ? [outcome.signals.transcript.slice(0, 500)] : [],
+          onScreenText: outcome.signals.onScreenText ? [outcome.signals.onScreenText.slice(0, 500)] : [],
+          comments: outcome.signals.comments ? [outcome.signals.comments.slice(0, 500)] : [],
+        },
+      });
     }
 
-    return NextResponse.json({
-      success: true,
-      content: outcome.content,
-      sufficientContent: true,
-      retrieval: outcome.retrieval,
-      analysis: aiOutcome.ok ? aiOutcome.analysis : null,
-      aiError: aiOutcome.ok ? null : toApiError(aiOutcome.error),
-    });
+    return NextResponse.json({ success: true, status: "ok", result: outcome.result });
   } catch (err) {
     console.error("[api/analyze] unexpected error:", err);
     return NextResponse.json(

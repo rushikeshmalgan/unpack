@@ -13,9 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Reel Decoder — understand any Reel in seconds",
+  title: "Unpack — reels into real links",
   description:
-    "Paste an Instagram Reel or Post link and see what it's about, what the creator wants you to do, and what you're supposed to get. Nothing is saved.",
+    "Paste an Instagram Reel or Post link and get the real, verified links it points to — videos, tools, repos, books, places, and more. No commenting, no following, no DM. Nothing is saved.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
