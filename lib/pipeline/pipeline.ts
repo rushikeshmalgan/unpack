@@ -44,11 +44,18 @@ function isLikelyCreatorOwned(pointer: Pointer): boolean {
 }
 
 // Everything a resolver's query can depend on, not just the name: Nominatim
-// searches name + location (+ locale) and the web-search hint depends on the
-// resourceType, so keying on name alone would serve "Cafe Zoe" in Goa the
-// cached answer for "Cafe Zoe" in Paris.
+// searches name + location (+ locale), the web-search hint depends on the
+// resourceType, and a Python package is searched on PyPI only, so keying on
+// name alone would serve "Cafe Zoe" in Goa the cached answer for "Cafe Zoe"
+// in Paris.
 function searchCacheKey(pointer: Pointer, ctx: ResolverContext): string {
-  return [pointer.name, pointer.resourceType, pointer.attributes.location ?? "", ctx.locale ?? ""].join("|");
+  return [
+    pointer.name,
+    pointer.resourceType,
+    pointer.attributes.location ?? "",
+    pointer.attributes.language ?? "",
+    ctx.locale ?? "",
+  ].join("|");
 }
 
 async function resolveCandidates(
@@ -300,7 +307,7 @@ async function assembleResult(
       deadlineAt,
       async () => {
         const { candidates, issues } = await resolveCandidates(explorePointer, ctx);
-        return { links: await verifyAndRank(explorePointer, candidates, { maxResults: 5 }), issues };
+        return { links: await verifyAndRank(explorePointer, candidates, { maxResults: 5, topical: true }), issues };
       },
       () => ({ links: [] as LinkResult[], issues: ["it ran out of time"] }),
     );

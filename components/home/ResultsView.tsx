@@ -37,7 +37,7 @@ function ConfidenceBadge({ confidence }: { confidence: LinkResult["confidence"] 
   );
 }
 
-function LinkCard({ link }: { link: LinkResult }) {
+function LinkCard({ link, showConfidence = true }: { link: LinkResult; showConfidence?: boolean }) {
   return (
     <div className="rounded-lg border border-border bg-background p-3">
       <div className="flex items-start justify-between gap-2">
@@ -45,7 +45,7 @@ function LinkCard({ link }: { link: LinkResult }) {
           <p className="truncate text-sm font-medium text-foreground">{link.title}</p>
           <p className="truncate text-xs text-muted-foreground">{link.source}</p>
         </div>
-        <ConfidenceBadge confidence={link.confidence} />
+        {showConfidence && <ConfidenceBadge confidence={link.confidence} />}
       </div>
       <p className="mt-1 text-xs text-muted-foreground">{link.reason}</p>
       <div className="mt-2 flex items-center gap-2">
@@ -213,7 +213,7 @@ export function ResultsView({
           <h3 className="mb-2 text-sm font-semibold text-foreground">Related to this reel&apos;s topic</h3>
           <div className="space-y-2">
             {result.explore!.map((link) => (
-              <LinkCard key={link.url} link={link} />
+              <LinkCard key={link.url} link={link} showConfidence={false} />
             ))}
           </div>
         </div>

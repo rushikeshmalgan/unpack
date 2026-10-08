@@ -203,6 +203,121 @@ describe("verifyAndRank: ranking quality on real-world shapes", () => {
     expect(results[0].url).toBe("https://www.raycast.com/");
   });
 
+  // Shapes taken from a live Tavily run, which behaves very differently from
+  // the structured APIs: many domains, free-form titles, and an order that
+  // puts aggregator pages ahead of the official site.
+  describe("web-search results (as observed live)", () => {
+    it("puts the official site first even when other pages tie it on title (linear.app vs a docs page and LinkedIn)", async () => {
+      const results = await rank(fixturePointer({ resourceType: "web_tool", name: "Linear" }), [
+        candidate({ url: "https://apps.make.com/linear", title: "Linear - Apps Documentation", source: "apps.make.com", snippet: "Linear is a project management tool." }),
+        candidate({ url: "https://www.linkedin.com/company/linearapp", title: "Linear", source: "www.linkedin.com", snippet: "Linear | LinkedIn" }),
+        candidate({ url: "https://linear.app", title: "Linear – The system for product development", source: "linear.app", snippet: "Linear is a purpose-built tool for planning and building products." }),
+      ]);
+      expect(results[0].url).toBe("https://linear.app");
+      expect(results[0].confidence).toBe("high");
+      expect(results.slice(1).every((r) => r.confidence !== "high")).toBe(true);
+    });
+
+    it("ranks an encyclopedia page below an equally good primary source (CS50: Wikipedia vs Harvard)", async () => {
+      const results = await rank(fixturePointer({ resourceType: "course", name: "CS50" }), [
+        candidate({ url: "https://en.wikipedia.org/wiki/CS50", title: "CS50 - Wikipedia", source: "en.wikipedia.org", snippet: "CS50 is an introductory course." }),
+        candidate({ url: "https://pll.harvard.edu/course/cs50", title: "CS50: Introduction to Computer Science | Harvard University", source: "pll.harvard.edu", snippet: "An entry-level course taught by David J. Malan." }),
+      ]);
+      expect(results.map((r) => r.url)).toEqual(["https://pll.harvard.edu/course/cs50", "https://en.wikipedia.org/wiki/CS50"]);
+    });
+
+    it("still returns the encyclopedia page when it is the best there is", async () => {
+      const results = await rank(fixturePointer({ resourceType: "course", name: "CS50" }), [
+        candidate({ url: "https://en.wikipedia.org/wiki/CS50", title: "CS50 - Wikipedia", source: "en.wikipedia.org", snippet: "CS50 is an introductory course." }),
+      ]);
+      expect(results).toHaveLength(1);
+      expect(results[0].confidence).toBe("high");
+    });
+
+    it("drops a page that shares one word of a three-word name and nothing else ('Blue Yeti microphone' -> 'Blue - Wikipedia')", async () => {
+      const results = await rank(fixturePointer({ resourceType: "product", name: "Blue Yeti microphone" }), [
+        candidate({ url: "https://en.wikipedia.org/wiki/Blue", title: "Blue - Wikipedia", source: "en.wikipedia.org", snippet: "Blue is one of the three primary colours of pigments in painting." }),
+        candidate({ url: "https://www.color-meanings.com/shades-of-blue", title: "144 Shades of Blue: Color Names, Hex, RGB, CMYK Codes", source: "www.color-meanings.com", snippet: "Shades of blue and their hex codes." }),
+      ]);
+      expect(results).toEqual([]);
+    });
+
+    it("keeps the real product page for the same name", async () => {
+      const results = await rank(fixturePointer({ resourceType: "product", name: "Blue Yeti microphone" }), [
+        candidate({ url: "https://en.wikipedia.org/wiki/Blue", title: "Blue - Wikipedia", source: "en.wikipedia.org", snippet: "Blue is a colour." }),
+        candidate({ url: "https://www.logitechg.com/yeti", title: "Yeti USB Microphone | Blue Microphones", source: "www.logitechg.com", snippet: "The Blue Yeti USB microphone for streaming." }),
+      ]);
+      expect(results.map((r) => r.url)).toEqual(["https://www.logitechg.com/yeti"]);
+    });
+  });
+
+  describe("package registry pages (PyPI, as observed live)", () => {
+    const pypi = (path: string) =>
+      candidate({ url: `https://pypi.org/project/${path}`, title: "requests · PyPI", source: "pypi.org", snippet: "Python HTTP for Humans." });
+
+    it("treats '·' as a title separator, so 'requests · PyPI' is a full match for 'requests'", async () => {
+      const [first] = await rank(fixturePointer({ resourceType: "library_package", name: "requests" }), [pypi("requests")]);
+      expect(first.confidence).toBe("high");
+    });
+
+    it("prefers the unversioned project page over equally-titled version pages", async () => {
+      const results = await rank(fixturePointer({ resourceType: "library_package", name: "requests" }), [
+        pypi("requests/2.17.1"),
+        pypi("requests/2.14.1"),
+        pypi("requests"),
+      ]);
+      expect(results[0].url).toBe("https://pypi.org/project/requests");
+    });
+
+    it("lets a shallower page win a tie between two pages of the same site", async () => {
+      const results = await rank(fixturePointer({ resourceType: "web_tool", name: "Warp" }), [
+        candidate({ url: "https://www.warp.dev/download", title: "Warp", source: "www.warp.dev" }),
+        candidate({ url: "https://www.warp.dev", title: "Warp", source: "www.warp.dev" }),
+      ]);
+      expect(results[0].url).toBe("https://www.warp.dev");
+    });
+
+    it("does not let depth override a clearly better match", async () => {
+      const results = await rank(fixturePointer({ resourceType: "web_tool", name: "Excalidraw" }), [
+        candidate({ url: "https://example.com/", title: "Excalidraw alternatives, reviews and pricing compared", source: "example.com" }),
+        candidate({ url: "https://excalidraw.com/app/whiteboard/draw", title: "Excalidraw", source: "excalidraw.com" }),
+      ]);
+      expect(results[0].url).toBe("https://excalidraw.com/app/whiteboard/draw");
+    });
+  });
+
+  describe("topical (explore) results", () => {
+    const topicPointer = fixturePointer({ resourceType: "other", name: "best resources to learn about self-belief" });
+    const articles = [
+      candidate({ url: "https://www.mind.org.uk/self-esteem", title: "How to improve self-esteem | Mind", source: "www.mind.org.uk" }),
+      candidate({ url: "https://www.mayoclinic.org/self-esteem", title: "Self-esteem: Take steps to feel better about yourself", source: "www.mayoclinic.org" }),
+      candidate({ url: "https://ryanzofay.com/self-esteem-books", title: "25 Best Self Esteem Books", source: "ryanzofay.com" }),
+    ];
+
+    it("keeps related pages that don't resemble the synthetic query, in the search engine's own order", async () => {
+      const results = await verifyAndRank(topicPointer, articles, { checkLivenessEnabled: false, topical: true });
+      expect(results.map((r) => r.url)).toEqual(articles.map((a) => a.url));
+    });
+
+    it("labels them as related reading rather than as a match for the made-up query", async () => {
+      const [first] = await verifyAndRank(topicPointer, articles, { checkLivenessEnabled: false, topical: true });
+      expect(first.reason).toBe("Related reading on this topic.");
+      expect(first.confidence).toBe("low");
+      expect(first.reason).not.toContain("best resources to learn");
+    });
+
+    it("still drops dead links and respects maxResults", async () => {
+      checkLivenessMock.mockResolvedValueOnce({ ok: false, reason: "dead", status: 404 });
+      const results = await verifyAndRank(topicPointer, articles, { topical: true, maxResults: 1 });
+      expect(results.map((r) => r.url)).toEqual(["https://www.mayoclinic.org/self-esteem"]);
+    });
+
+    it("without topical mode the same candidates are (correctly) filtered out as non-matches", async () => {
+      const results = await verifyAndRank(topicPointer, articles, { checkLivenessEnabled: false });
+      expect(results.length).toBeLessThan(articles.length);
+    });
+  });
+
   describe("non-English names", () => {
     it("matches Devanagari names (an ASCII-only tokenizer erases them and drops every candidate)", async () => {
       const results = await rank(fixturePointer({ resourceType: "place", name: "कैफ़े कॉफ़ी हाउस" }), [

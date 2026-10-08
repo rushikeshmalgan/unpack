@@ -97,7 +97,51 @@ describe("webSearchResolver", () => {
     const init = fetchMock.mock.calls[0][1];
     expect(init.method).toBe("POST");
     expect(init.headers.Authorization).toBe("Bearer test-key");
-    expect(JSON.parse(init.body).query).toBe("Excalidraw official site");
+    expect(JSON.parse(init.body).query).toBe("Excalidraw");
+  });
+
+  describe("query construction (checked against live Tavily results)", () => {
+    async function bodySentFor(pointer: Pointer) {
+      vi.stubEnv("TAVILY_API_KEY", "test-key");
+      const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ results: [] }));
+      vi.stubGlobal("fetch", fetchMock);
+      await webSearchResolver.search(pointer, {});
+      return JSON.parse(fetchMock.mock.calls[0][1].body);
+    }
+    const withLanguage = (language: string | null) =>
+      fixturePointer({
+        resourceType: "library_package",
+        name: "pydantic",
+        attributes: { creator: null, year: null, topic: null, language, location: null, visibleUrl: null, price: null },
+      });
+
+    it("does not add 'official site' for tools or websites: it pushed linear.app out of the top five", async () => {
+      expect((await bodySentFor(fixturePointer({ resourceType: "web_tool", name: "Linear" }))).query).toBe("Linear");
+      expect((await bodySentFor(fixturePointer({ resourceType: "website", name: "Linear" }))).query).toBe("Linear");
+    });
+
+    it("keeps the 'course' hint, which is what surfaces cs50.harvard.edu", async () => {
+      expect((await bodySentFor(fixturePointer({ resourceType: "course", name: "CS50" }))).query).toBe("CS50 course");
+    });
+
+    it("finds Python packages with include_domains, not a site: operator Tavily ignores", async () => {
+      const body = await bodySentFor(withLanguage("Python"));
+      expect(body.include_domains).toEqual(["pypi.org"]);
+      expect(body.query).toBe("pydantic");
+      expect(body.query).not.toMatch(/site:/);
+    });
+
+    it.each([null, "javascript", "rust"])("does not restrict domains for a package whose language is %s", async (language) => {
+      expect((await bodySentFor(withLanguage(language))).include_domains).toBeUndefined();
+    });
+
+    it("never restricts domains for non-package pointers, whatever their language", async () => {
+      const pointer = fixturePointer({
+        resourceType: "web_tool",
+        attributes: { creator: null, year: null, topic: null, language: "python", location: null, visibleUrl: null, price: null },
+      });
+      expect((await bodySentFor(pointer)).include_domains).toBeUndefined();
+    });
   });
 
   it("parses a real-shaped Tavily response", async () => {

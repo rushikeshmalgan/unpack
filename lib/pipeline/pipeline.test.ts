@@ -425,7 +425,25 @@ describe("runPipeline", () => {
         await runPipeline({ url: VALID_URL, manual: {}, mode: "exact", locale: "en" });
       }
 
-      expect(keys).toEqual(["Cafe Zoe|place|Goa|en", "Cafe Zoe|place|Paris|en"]);
+      expect(keys).toEqual(["Cafe Zoe|place|Goa||en", "Cafe Zoe|place|Paris||en"]);
+    });
+
+    it("separates a package searched as Python (PyPI only) from the same name with no language", async () => {
+      resolversForMock.mockReturnValue([genuineMiss]);
+      const keys: string[] = [];
+      getCachedSearchMock.mockImplementation(async (_id: string, key: string) => { keys.push(key); return null; });
+
+      for (const language of ["python", null]) {
+        understandReelMock.mockResolvedValue(
+          understandingWith(pointerFixture({
+            resourceType: "library_package", name: "pydantic",
+            attributes: { creator: null, year: null, topic: null, language, location: null, visibleUrl: null, price: null },
+          })),
+        );
+        await runPipeline({ url: VALID_URL, manual: {}, mode: "exact" });
+      }
+
+      expect(new Set(keys).size).toBe(2);
     });
 
     it("also separates the same name searched as a different resource type", async () => {
