@@ -9,11 +9,14 @@ import { youtubeResolver } from "@/lib/pipeline/resolvers/youtubeResolver";
 import { webSearchResolver } from "@/lib/pipeline/resolvers/webSearchResolver";
 
 // Adding a resolver = write one file implementing `Resolver`, then add it
-// here. Order matters only in that webSearchResolver must stay last (it
-// matches every resourceType as the universal fallback).
+// here. Order is resolver priority: when two resolvers return equally good
+// name matches, the earlier one's result ranks first (e.g. a `library_package`
+// pointer lists the registry page before a same-named GitHub repo).
+// webSearchResolver must stay last (it matches every resourceType as the
+// universal fallback).
 export const RESOLVERS: Resolver[] = [
-  githubResolver,
   packageResolver,
+  githubResolver,
   bookResolver,
   academicResolver,
   placesResolver,

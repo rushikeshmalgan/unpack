@@ -25,4 +25,8 @@ describe("resolversFor", () => {
     expect(ids).toContain("github");
     expect(ids).toContain("npm");
   });
+
+  it("ranks the package registry ahead of GitHub for library_package, with web search always last", () => {
+    expect(resolversFor("library_package").map((r) => r.id)).toEqual(["npm", "github", "web_search"]);
+  });
 });

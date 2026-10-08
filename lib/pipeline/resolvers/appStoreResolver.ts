@@ -8,6 +8,7 @@ interface ITunesResult {
   trackViewUrl: string;
   artistName: string;
   averageUserRating?: number;
+  userRatingCount?: number;
   formattedPrice?: string;
 }
 
@@ -29,6 +30,7 @@ async function searchAppStore(query: string): Promise<Candidate[]> {
     return (body.results ?? []).map((r) => ({
       url: r.trackViewUrl,
       title: r.trackName,
+      popularity: r.userRatingCount,
       source: "apps.apple.com",
       snippet: `by ${r.artistName}`,
       meta: { rating: r.averageUserRating, price: r.formattedPrice },

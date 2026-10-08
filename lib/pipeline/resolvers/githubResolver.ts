@@ -4,6 +4,7 @@ import type { Pointer } from "@/lib/schemas/pipeline/understanding";
 const TIMEOUT_MS = 8000;
 
 interface GitHubItem {
+  name: string;
   full_name: string;
   html_url: string;
   description: string | null;
@@ -30,6 +31,8 @@ async function searchGitHub(query: string): Promise<Candidate[]> {
     return (body.items ?? []).map((item) => ({
       url: item.html_url,
       title: item.full_name,
+      aliases: [item.name],
+      popularity: item.stargazers_count,
       source: "github.com",
       publishedDate: item.updated_at,
       snippet: item.description,
