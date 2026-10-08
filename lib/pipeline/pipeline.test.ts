@@ -186,4 +186,60 @@ describe("runPipeline", () => {
     await runPipeline({ url: VALID_URL, manual: {}, mode: "exact" });
     expect(ingestReelMock).not.toHaveBeenCalled();
   });
+
+  describe("ingestion cache vs. user-pasted text", () => {
+    it("never reads the shared cache when the user pasted something, so a stale entry cannot override their input", async () => {
+      getCachedIngestionMock.mockResolvedValue(baseSignals({ caption: "SOMEONE ELSE'S CACHED CAPTION" }));
+      ingestReelMock.mockResolvedValue({ ok: true, signals: baseSignals({ caption: "my own pasted caption text" }) });
+      understandReelMock.mockResolvedValue({ ok: true, data: baseUnderstanding() });
+
+      await runPipeline({ url: VALID_URL, manual: { caption: "my own pasted caption text" }, mode: "exact" });
+
+      expect(getCachedIngestionMock).not.toHaveBeenCalled();
+      expect(ingestReelMock).toHaveBeenCalledOnce();
+      const signalsSentToAi = understandReelMock.mock.calls[0][0];
+      expect(signalsSentToAi.caption).toBe("my own pasted caption text");
+    });
+
+    it("never writes user-pasted content to the shared cache", async () => {
+      ingestReelMock.mockResolvedValue({ ok: true, signals: baseSignals({ caption: "private pasted text about me" }) });
+      understandReelMock.mockResolvedValue({ ok: true, data: baseUnderstanding() });
+
+      await runPipeline({ url: VALID_URL, manual: { transcript: "private pasted text about me" }, mode: "exact" });
+
+      expect(setCachedIngestionMock).not.toHaveBeenCalled();
+    });
+
+    it("treats whitespace-only fields as no input", async () => {
+      ingestReelMock.mockResolvedValue({ ok: true, signals: baseSignals({ status: "partial" }) });
+      understandReelMock.mockResolvedValue({ ok: true, data: baseUnderstanding() });
+
+      await runPipeline({ url: VALID_URL, manual: { caption: "   ", comments: "" }, mode: "exact" });
+
+      expect(getCachedIngestionMock).toHaveBeenCalledOnce();
+      expect(setCachedIngestionMock).toHaveBeenCalledOnce();
+    });
+
+    it("caches automatically retrieved signals for a bare link", async () => {
+      ingestReelMock.mockResolvedValue({ ok: true, signals: baseSignals({ status: "partial" }) });
+      understandReelMock.mockResolvedValue({ ok: true, data: baseUnderstanding() });
+
+      await runPipeline({ url: VALID_URL, manual: {}, mode: "exact" });
+
+      expect(setCachedIngestionMock).toHaveBeenCalledOnce();
+      expect(setCachedIngestionMock.mock.calls[0][0]).toBe("abc123");
+    });
+
+    it("does not cache a 'none' result, so a transient retrieval failure isn't remembered for the full TTL", async () => {
+      ingestReelMock.mockResolvedValue({
+        ok: true,
+        signals: baseSignals({ caption: null, status: "none", missing: ["caption", "transcript", "on-screen text", "comments"] }),
+      });
+
+      const outcome = await runPipeline({ url: VALID_URL, manual: {}, mode: "exact" });
+
+      expect(outcome.status).toBe("insufficient");
+      expect(setCachedIngestionMock).not.toHaveBeenCalled();
+    });
+  });
 });

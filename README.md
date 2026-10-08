@@ -64,7 +64,7 @@ npm run build
     Final JSON         silently into exact matches.
 ```
 
-Caching (Stage C/pipeline-level, `lib/pipeline/cache.ts`): resolver search results and ingested-reel signals are cached in the same Upstash Redis instance used for rate limiting, keyed by resolver+query or by reel shortcode, with TTLs (1 day / 7 days). This is purely a cost/latency optimization, not a database of user content — it's keyed by content hashes/shortcodes, not by user or session, holds no PII, and the app runs correctly with it absent (every cache call is wrapped in try/catch and no-ops without Redis configured). "History of past lookups" in the UI is `localStorage` only and never reaches the server.
+Caching (Stage C/pipeline-level, `lib/pipeline/cache.ts`): resolver search results and ingested-reel signals are cached in the same Upstash Redis instance used for rate limiting, keyed by resolver+query or by reel shortcode, with TTLs (1 day / 7 days). This is purely a cost/latency optimization, not a database of user content. The ingestion cache is shared across all users and keyed only by reel shortcode, so it holds **only automatically retrieved signals** (extractor / public metadata) — anything a user pastes is never read from or written to it, and "no signal" results are never cached (so a transient outage isn't remembered). The app runs correctly with the cache absent (every cache call is wrapped in try/catch and no-ops without Redis configured). "History of past lookups" in the UI is `localStorage` only and never reaches the server.
 
 ### Adding a resolver
 

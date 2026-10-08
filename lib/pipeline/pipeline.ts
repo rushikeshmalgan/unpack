@@ -24,6 +24,10 @@ const MIN_SUFFICIENT_SIGNAL_LENGTH = 20;
 const CREATOR_OWNED_RESOURCE_TYPES = new Set(["template", "prompt", "design_asset"]);
 const CREATOR_OWNED_LANGUAGE = /\b(my|i'll send|i will send|i made|dm you|i created|my own)\b/i;
 
+function hasManualInput(manual: ManualFallbackInput): boolean {
+  return Object.values(manual).some((v) => typeof v === "string" && v.trim().length > 0);
+}
+
 function isLikelyCreatorOwned(pointer: Pointer): boolean {
   if (pointer.kind !== "gated") return false;
   if (CREATOR_OWNED_RESOURCE_TYPES.has(pointer.resourceType)) return true;
@@ -100,7 +104,14 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineOutcome
     return { status: "invalid_url", message: describeUrlError(validated.reason) };
   }
 
-  const cached = await getCachedIngestion<IngestedSignals>(validated.shortcode);
+  // The ingestion cache is shared across all users and keyed only by reel
+  // shortcode, so it may only ever hold what was retrieved automatically
+  // (extractor / public metadata). Anything the user pasted is private to
+  // their request: reading the cache would let a stale entry override their
+  // input, and writing it would serve their text to the next person who
+  // submits the same reel (leakage, and a cache-poisoning vector).
+  const usesManualInput = hasManualInput(input.manual);
+  const cached = usesManualInput ? null : await getCachedIngestion<IngestedSignals>(validated.shortcode);
   let signals: IngestedSignals;
   if (cached) {
     signals = cached;
@@ -110,7 +121,11 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineOutcome
       return { status: "invalid_url", message: ingestOutcome.message };
     }
     signals = ingestOutcome.signals;
-    await setCachedIngestion(validated.shortcode, signals);
+    // "none" is never cached: a transient extractor/metadata failure would
+    // otherwise be remembered as "this reel has no content" for the full TTL.
+    if (!usesManualInput && signals.status !== "none") {
+      await setCachedIngestion(validated.shortcode, signals);
+    }
   }
 
   const signalLength = (signals.caption?.length ?? 0) + (signals.transcript?.length ?? 0) + (signals.onScreenText?.length ?? 0);
