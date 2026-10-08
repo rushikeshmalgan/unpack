@@ -100,4 +100,80 @@ describe("checkLiveness", () => {
     const result = await checkLiveness("https://slow.example/x");
     expect(result).toEqual({ ok: false, reason: "timeout" });
   });
+
+  describe("HTTP status semantics", () => {
+    function stubStatuses(...statuses: number[]) {
+      lookupMock.mockResolvedValue({ address: "93.184.216.34" });
+      const fetchMock = vi.fn();
+      for (const s of statuses) fetchMock.mockResolvedValueOnce(headResponse(s));
+      vi.stubGlobal("fetch", fetchMock);
+      return fetchMock;
+    }
+
+    it("drops a page that answers 404 to both HEAD and GET (a dead link is not alive)", async () => {
+      const fetchMock = stubStatuses(404, 404);
+      const result = await checkLiveness("https://github.com/someone/deleted-repo");
+      expect(result).toEqual({ ok: false, reason: "dead", status: 404 });
+      expect(fetchMock.mock.calls.map((c) => c[1].method)).toEqual(["HEAD", "GET"]);
+    });
+
+    it.each([410, 500, 503])("drops a page that answers %i", async (status) => {
+      stubStatuses(status, status);
+      expect(await checkLiveness("https://broken.example/x")).toEqual({ ok: false, reason: "dead", status });
+    });
+
+    it("retries with GET when HEAD is refused, and accepts the page if GET works (npmjs.com answers HEAD 403 but GET 200)", async () => {
+      const fetchMock = stubStatuses(403, 200);
+      const result = await checkLiveness("https://www.npmjs.com/package/lodash");
+      expect(result).toEqual({ ok: true, status: 200 });
+      expect(fetchMock.mock.calls.map((c) => c[1].method)).toEqual(["HEAD", "GET"]);
+    });
+
+    it("retries with GET on 405 Method Not Allowed (amazon.com answers HEAD 405 but GET 200)", async () => {
+      stubStatuses(405, 200);
+      expect(await checkLiveness("https://www.amazon.com/dp/0735211299")).toEqual({ ok: true, status: 200 });
+    });
+
+    it.each([401, 403, 429, 451])(
+      "keeps a page that answers %i to both probes: the server exists but blocks bots, so dropping it would discard a real link",
+      async (status) => {
+        stubStatuses(status, status);
+        expect(await checkLiveness("https://protected.example/x")).toEqual({ ok: true, status });
+      },
+    );
+
+    it("does not spend a second request when HEAD already succeeded", async () => {
+      const fetchMock = stubStatuses(200);
+      await checkLiveness("https://example.com/");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("judges the final hop of a redirect chain, not the first", async () => {
+      lookupMock.mockResolvedValue({ address: "93.184.216.34" });
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(headResponse(301, "https://moved.example/gone"))
+        .mockResolvedValueOnce(headResponse(404))
+        .mockResolvedValueOnce(headResponse(404));
+      vi.stubGlobal("fetch", fetchMock);
+
+      expect(await checkLiveness("https://old.example/x")).toEqual({ ok: false, reason: "dead", status: 404 });
+    });
+
+    it("identifies itself with an honest User-Agent and never follows redirects automatically", async () => {
+      const fetchMock = stubStatuses(200);
+      await checkLiveness("https://example.com/");
+      const init = fetchMock.mock.calls[0][1];
+      expect(init.headers["User-Agent"]).toContain("UnpackLinkCheck");
+      expect(init.redirect).toBe("manual");
+    });
+
+    it("still blocks a private IP on the GET fallback path (SSRF guard applies before any probe)", async () => {
+      lookupMock.mockResolvedValue({ address: "169.254.169.254" });
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      expect(await checkLiveness("https://metadata.example/latest")).toEqual({ ok: false, reason: "blocked_host" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
 });

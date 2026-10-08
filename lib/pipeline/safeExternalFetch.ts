@@ -9,9 +9,26 @@ import { isIP } from "node:net";
 // (defeats a bare "use a private IP as the hostname" trick, though a
 // resolve-then-reconnect DNS-rebinding attack would still need the fetch
 // itself to re-resolve — acceptable residual risk for a liveness check that
-// only ever does a HEAD).
-const TIMEOUT_MS = 5000;
+// only ever reads a status line: a HEAD, or a GET whose body is discarded
+// unread.
+// One deadline for the whole check (all hops and both HEAD/GET probes), so a
+// slow site can't stack per-hop timeouts and drag out the request.
+const TOTAL_TIMEOUT_MS = 6000;
 const MAX_REDIRECTS = 2;
+const USER_AGENT = "Mozilla/5.0 (compatible; UnpackLinkCheck/1.0)";
+
+// The server answered but won't serve an automated client (bot wall, rate
+// limit, geo/legal block). The page exists, so dropping it would throw away a
+// real, officially-sourced link — only 404/410/5xx-style answers mean "dead".
+const EXISTS_BUT_BLOCKED = new Set([401, 403, 429, 451, 999]);
+
+function isSuccess(status: number): boolean {
+  return status >= 200 && status < 300;
+}
+
+function isRedirect(status: number): boolean {
+  return status >= 300 && status < 400;
+}
 
 function isPrivateOrReservedIp(ip: string): boolean {
   const version = isIP(ip);
@@ -41,9 +58,36 @@ function isPrivateOrReservedIp(ip: string): boolean {
 
 export type SafeExternalFetchResult =
   | { ok: true; status: number }
-  | { ok: false; reason: "blocked_host" | "unreachable" | "timeout" };
+  | { ok: false; reason: "blocked_host" | "unreachable" | "timeout" }
+  | { ok: false; reason: "dead"; status: number };
+
+async function probe(url: string, method: "HEAD" | "GET", signal: AbortSignal): Promise<Response> {
+  const response = await fetch(url, {
+    method,
+    redirect: "manual",
+    signal,
+    headers: { "User-Agent": USER_AGENT },
+  });
+  // Only the status line and headers matter; don't download a GET body.
+  try {
+    await response.body?.cancel();
+  } catch {
+    // body already consumed/closed — nothing to release
+  }
+  return response;
+}
 
 export async function checkLiveness(initialUrl: string): Promise<SafeExternalFetchResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TOTAL_TIMEOUT_MS);
+  try {
+    return await followHops(initialUrl, controller.signal);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function followHops(initialUrl: string, signal: AbortSignal): Promise<SafeExternalFetchResult> {
   let currentUrl = initialUrl;
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
@@ -70,30 +114,32 @@ export async function checkLiveness(initialUrl: string): Promise<SafeExternalFet
       return { ok: false, reason: "unreachable" };
     }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
     try {
-      const response = await fetch(parsed.toString(), {
-        method: "HEAD",
-        redirect: "manual",
-        signal: controller.signal,
-      });
+      let response = await probe(parsed.toString(), "HEAD", signal);
 
-      if (response.status >= 300 && response.status < 400) {
+      // Plenty of real sites refuse or mishandle HEAD (npmjs.com -> 403,
+      // amazon.com -> 405) while serving GET fine, so a non-OK HEAD gets one
+      // GET retry before we judge the link.
+      if (!isSuccess(response.status) && !isRedirect(response.status)) {
+        response = await probe(parsed.toString(), "GET", signal);
+      }
+
+      if (isRedirect(response.status)) {
         const location = response.headers.get("location");
         if (!location) return { ok: false, reason: "unreachable" };
         currentUrl = new URL(location, parsed).toString();
         continue;
       }
 
-      return { ok: true, status: response.status };
+      if (isSuccess(response.status) || EXISTS_BUT_BLOCKED.has(response.status)) {
+        return { ok: true, status: response.status };
+      }
+      return { ok: false, reason: "dead", status: response.status };
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") {
         return { ok: false, reason: "timeout" };
       }
       return { ok: false, reason: "unreachable" };
-    } finally {
-      clearTimeout(timer);
     }
   }
 
