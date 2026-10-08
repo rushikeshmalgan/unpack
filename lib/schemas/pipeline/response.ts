@@ -42,7 +42,9 @@ export interface IngestionStatus {
 }
 
 export interface PipelineResult {
-  reel: { url: string; creator: string | null; captionPreview: string | null; reelType: ReelType };
+  // `topic` is what the model says the reel is about when it points to nothing
+  // concrete, so a reel with no links can still tell the user something true.
+  reel: { url: string; creator: string | null; captionPreview: string | null; reelType: ReelType; topic: string | null };
   creatorPromise: string | null;
   results: PointerResult[];
   creatorOwned: CreatorOwnedItem[];

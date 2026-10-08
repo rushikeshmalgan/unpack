@@ -144,6 +144,9 @@ export function ResultsView({
     result.evidencePanel.transcriptSnippets.length > 0 ||
     result.evidencePanel.onScreenText.length > 0 ||
     result.evidencePanel.comments.length > 0;
+  const hasExplore = (result.explore?.length ?? 0) > 0;
+  const nothingToShow =
+    result.results.length === 0 && result.creatorOwned.length === 0 && result.unresolved.length === 0 && !hasExplore;
 
   return (
     <div className="space-y-5 rounded-xl border border-border bg-surface p-5 sm:p-8">
@@ -205,20 +208,30 @@ export function ResultsView({
         </div>
       )}
 
-      {result.explore && result.explore.length > 0 && (
+      {hasExplore && (
         <div>
           <h3 className="mb-2 text-sm font-semibold text-foreground">Related to this reel&apos;s topic</h3>
           <div className="space-y-2">
-            {result.explore.map((link) => (
+            {result.explore!.map((link) => (
               <LinkCard key={link.url} link={link} />
             ))}
           </div>
         </div>
       )}
 
-      {result.results.length === 0 && result.creatorOwned.length === 0 && result.unresolved.length === 0 && !result.explore && (
+      {nothingToShow && (
         <p className="text-sm text-muted-foreground">
-          Nothing specific to point to in this content — try &quot;Explore topic instead&quot; above.
+          {result.reel.topic ? (
+            <>
+              This reel doesn&apos;t point to anything specific — it&apos;s about{" "}
+              <strong className="text-foreground">{result.reel.topic}</strong>.
+            </>
+          ) : (
+            "Nothing specific to point to in this content."
+          )}
+          {/* An empty `explore` means related reading was already tried, so
+              suggesting the toggle would send the user in a circle. */}
+          {result.explore === null && <> Try &quot;Explore topic instead&quot; above for related reading.</>}
         </p>
       )}
 

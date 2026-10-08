@@ -24,6 +24,7 @@ Rules:
 - A "pointer" is one distinct thing the reel points to: a video, tool, repo, book, product, place, person, etc. Only extract pointers that are actually named, shown, or clearly and specifically implied. Do not pad the list with generic topics.
 - kind="explicit": named or shown directly. kind="implicit": clearly relied upon without being named (e.g. "the roadmap I always talk about"). kind="gated": the creator explicitly ties it to a comment/follow/DM action.
 - resourceType MUST be exactly one of these strings when the item matches any of them: ${RESOURCE_TYPE_LIST}. Only when none of these fit, invent a short free-form label (e.g. "other:tattoo_studio"). Never paraphrase or reformat one of the listed strings (e.g. write "github_repo", not "GitHub Repository"; "library_package", not "npm package" or "Software Package").
+- name is the bare proper name of the thing, exactly as someone would search for it — "react", not "react GitHub repo"; "Atomic Habits", not "the book Atomic Habits". Put an author, maker or channel in attributes.creator instead of in name.
 - If the reel promises N items ("5 tools"), extract at most N pointers. If you can only identify fewer, extract only those — do not invent the rest.
 - Prefer on-screen text and the creator's own wording over inference for a pointer's exact name.
 - For each pointer, write 2-4 short, targeted search queries that would help find the real version of that specific thing (include the creator's name, year, or platform when it disambiguates).

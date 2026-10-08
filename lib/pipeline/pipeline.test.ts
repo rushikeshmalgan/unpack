@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UnderstandingResult } from "@/lib/schemas/pipeline/understanding";
 
 const ingestReelMock = vi.fn();
@@ -27,7 +27,7 @@ vi.mock("@/lib/pipeline/cache", () => ({
   setCachedSearch: setCachedSearchMock,
 }));
 
-const { runPipeline } = await import("@/lib/pipeline/pipeline");
+const { runPipeline, PIPELINE_BUDGET_MS } = await import("@/lib/pipeline/pipeline");
 
 const VALID_URL = "https://www.instagram.com/reel/abc123/";
 
@@ -185,6 +185,151 @@ describe("runPipeline", () => {
 
     await runPipeline({ url: VALID_URL, manual: {}, mode: "exact" });
     expect(ingestReelMock).not.toHaveBeenCalled();
+  });
+
+  describe("ordering, time budget and containment", () => {
+    const attrs = { creator: null, year: null, topic: null, language: null, location: null, visibleUrl: null, price: null };
+    const pointerNamed = (name: string) => ({
+      id: name, kind: "explicit" as const, resourceType: "web_tool", name, attributes: attrs, evidence: [], confidence: 0.9,
+    });
+    const linkFor = (name: string) => [
+      { title: name, url: `https://${name.toLowerCase()}.example`, source: `${name.toLowerCase()}.example`, reason: "match", confidence: "high" as const },
+    ];
+    const understandingOf = (...names: string[]) => ({
+      ok: true, data: baseUnderstanding({ pointers: names.map(pointerNamed) }),
+    });
+    const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    beforeEach(() => {
+      ingestReelMock.mockResolvedValue({ ok: true, signals: baseSignals() });
+      resolversForMock.mockReturnValue([{ id: "r", handles: () => true, search: vi.fn(async () => []) }]);
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    it("lists results in the order the reel mentioned them, not the order the lookups finished", async () => {
+      // "First" is the slowest lookup and "Third" the fastest, so completion order is the reverse.
+      verifyAndRankMock.mockImplementation(async (p: { name: string }) => {
+        await delay({ First: 40, Second: 20, Third: 1 }[p.name] ?? 1);
+        return linkFor(p.name);
+      });
+      understandReelMock.mockResolvedValue(understandingOf("First", "Second", "Third"));
+
+      const outcome = await runPipeline({ url: VALID_URL, manual: {}, mode: "exact" });
+      if (outcome.status !== "ok") throw new Error("expected ok");
+      expect(outcome.result.results.map((r) => r.name)).toEqual(["First", "Second", "Third"]);
+    });
+
+    it("returns partial results on time instead of running past the platform limit", async () => {
+      vi.useFakeTimers();
+      verifyAndRankMock.mockImplementation((p: { name: string }) =>
+        p.name === "Hangs" ? new Promise(() => {}) : Promise.resolve(linkFor(p.name)),
+      );
+      understandReelMock.mockResolvedValue(understandingOf("Fine", "Hangs"));
+
+      const pending = runPipeline({ url: VALID_URL, manual: {}, mode: "exact" });
+      await vi.advanceTimersByTimeAsync(PIPELINE_BUDGET_MS + 1);
+      const outcome = await pending;
+
+      if (outcome.status !== "ok") throw new Error("expected ok");
+      expect(outcome.result.results.map((r) => r.name)).toEqual(["Fine"]);
+      expect(outcome.result.unresolved).toEqual([
+        { pointerId: "Hangs", name: "Hangs", reason: "Ran out of time while searching for this one — try again." },
+      ]);
+      expect(outcome.result.warnings).toContain("Some links took too long to look up and were skipped — try again for those.");
+    });
+
+    it("doesn't even start looking when a slow AI call already used up the budget", async () => {
+      vi.useFakeTimers();
+      understandReelMock.mockImplementation(async () => {
+        vi.setSystemTime(Date.now() + PIPELINE_BUDGET_MS + 1);
+        return understandingOf("A", "B");
+      });
+
+      const outcome = await runPipeline({ url: VALID_URL, manual: {}, mode: "exact" });
+
+      if (outcome.status !== "ok") throw new Error("expected ok");
+      expect(resolversForMock).not.toHaveBeenCalled();
+      expect(outcome.result.unresolved.map((u) => u.name)).toEqual(["A", "B"]);
+      expect(outcome.result.results).toEqual([]);
+    });
+
+    it("keeps the other results when one pointer blows up unexpectedly", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      verifyAndRankMock.mockImplementation(async (p: { name: string }) => {
+        if (p.name === "Boom") throw new Error("unexpected");
+        return linkFor(p.name);
+      });
+      understandReelMock.mockResolvedValue(understandingOf("Good", "Boom", "AlsoGood"));
+
+      const outcome = await runPipeline({ url: VALID_URL, manual: {}, mode: "exact" });
+
+      if (outcome.status !== "ok") throw new Error("expected ok");
+      expect(outcome.result.results.map((r) => r.name)).toEqual(["Good", "AlsoGood"]);
+      expect(outcome.result.unresolved).toEqual([
+        { pointerId: "Boom", name: "Boom", reason: "Something went wrong while searching for this one." },
+      ]);
+    });
+
+    describe("a reel that points to nothing", () => {
+      const noPointers = (overrides = {}) => ({
+        ok: true,
+        data: baseUnderstanding({ reelType: "motivational", topicIfNoPointers: "self-belief", pointers: [], ...overrides }),
+      });
+
+      it("reports the topic the model identified, so the user is told something true", async () => {
+        understandReelMock.mockResolvedValue(noPointers());
+        const outcome = await runPipeline({ url: VALID_URL, manual: {}, mode: "exact" });
+        if (outcome.status !== "ok") throw new Error("expected ok");
+        expect(outcome.result.reel.topic).toBe("self-belief");
+      });
+
+      it("distinguishes 'looked for related reading and found none' (empty list) from 'didn't look' (null), and says why", async () => {
+        resolversForMock.mockReturnValue([
+          {
+            id: "web_search",
+            handles: () => true,
+            search: vi.fn(async (_p: unknown, ctx: { reportIssue?: (m: string) => void }) => {
+              ctx.reportIssue?.("Web search isn't enabled on this server");
+              return [];
+            }),
+          },
+        ]);
+        understandReelMock.mockResolvedValue(noPointers());
+
+        const outcome = await runPipeline({ url: VALID_URL, manual: {}, mode: "exact" });
+        if (outcome.status !== "ok") throw new Error("expected ok");
+        expect(outcome.result.explore).toEqual([]);
+        expect(outcome.result.warnings).toContain(
+          "Couldn't find related reading for this topic (Web search isn't enabled on this server).",
+        );
+      });
+
+      it("leaves explore as null, with no explore warning, when the reel has pointers and exact mode was asked for", async () => {
+        verifyAndRankMock.mockResolvedValue(linkFor("Tool"));
+        understandReelMock.mockResolvedValue(understandingOf("Tool"));
+
+        const outcome = await runPipeline({ url: VALID_URL, manual: {}, mode: "exact" });
+        if (outcome.status !== "ok") throw new Error("expected ok");
+        expect(outcome.result.explore).toBeNull();
+        expect(outcome.result.warnings.some((w) => w.includes("related reading"))).toBe(false);
+      });
+
+      it("reports a timed-out explore search as such", async () => {
+        vi.useFakeTimers();
+        understandReelMock.mockImplementation(async () => {
+          vi.setSystemTime(Date.now() + PIPELINE_BUDGET_MS + 1);
+          return noPointers();
+        });
+        const outcome = await runPipeline({ url: VALID_URL, manual: {}, mode: "exact" });
+        if (outcome.status !== "ok") throw new Error("expected ok");
+        expect(outcome.result.explore).toEqual([]);
+        expect(outcome.result.warnings).toContain("Couldn't find related reading for this topic (it ran out of time).");
+      });
+    });
   });
 
   describe("resolver failures vs. genuine misses", () => {

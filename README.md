@@ -10,7 +10,7 @@ npm run dev
 Open [http://localhost:3000](http://localhost:3000). Without a `.env` file, the app runs fully (homepage, validation, content retrieval) but the AI understanding step returns a graceful "not configured" error — copy `.env.example` to `.env` and set `GEMINI_API_KEY` to exercise the full flow locally. The in-memory rate limiter and local dev don't need Upstash. Every resolver API key is optional; the pipeline works with zero keys configured (see "Resolvers" below).
 
 ```bash
-npm run test   # vitest — 200+ tests
+npm run test   # vitest — 300+ tests
 npm run lint
 npm run build
 ```
@@ -28,8 +28,8 @@ npm run build
  ┌─────────────────┐  Stage A: ingest        lib/pipeline/ingest/ingestReel.ts
  │ 1. pluggable     │  3-tier fallback, each one optional:
  │    extractor     │  1) EXTRACTOR_API_URL (your own self-hosted service)
- │    (if EXTRACTOR_│  2) Instagram oEmbed/OG-tag metadata (existing,
- │    API_URL set)  │     allowlisted fetch — this app's only own retrieval)
+ │    (if EXTRACTOR_│  2) Instagram OG-tag metadata (allowlisted fetch;
+ │    API_URL set)  │     now mostly empty for posts — see Known limitations)
  │ 2) oEmbed/OG tags│  3) whatever the user pastes manually (caption/
  │ 3) manual paste  │     transcript/on-screen text/comments)
  └────────┬─────────┘
@@ -137,10 +137,16 @@ If no extractor is configured and the metadata fallback doesn't yield enough sig
 - **Resolver search results and ingested signals are cached** (see Architecture above) so repeat lookups of the same reel or search query don't re-spend AI/API quota.
 - **Ranking is deterministic, not an LLM call.** Stage D scores candidates by name/token overlap plus an official-source-domain boost — no extra Gemini call per pointer. This keeps AI cost bounded regardless of how many pointers a reel has, at the cost of ranking being a heuristic rather than a judgment call; see "Known limitations."
 - **Rate limiting** (12 requests/60s by IP) is the primary abuse control, since there's no authentication.
+- **A 50-second pipeline budget** (`PIPELINE_BUDGET_MS`, under the route's 60s `maxDuration`) covers everything from ingestion to link-finding. Link-finding gets whatever the AI call left over; pointers that don't finish in time come back as "Ran out of time while searching for this one — try again" next to the ones that did, rather than the platform killing the request with nothing. Results are always listed in the order the reel mentioned them.
 
 ---
 
 ## Known limitations
+
+Found by running the real pipeline against live services (as opposed to mocks) in October 2026:
+
+- **Instagram no longer exposes post metadata to unauthenticated requests.** Fetching an individual `/p/` or `/reel/` page now returns a bare app shell with no Open Graph tags (profile pages still have them), and the lightweight `/embed/` variant reports the media as unavailable. The metadata tier of ingestion is therefore effectively empty for real posts, which makes **pasting the caption (or running your own extractor) the real input path**, not an occasional fallback. A bare link correctly comes back as "insufficient" and asks for a paste. Consider showing the paste fields by default.
+- **AI latency and availability dominate reliability, and the free tier made it worse.** On the day of testing, a trivial one-word Gemini prompt took 8-22 seconds (normally under 2) and structured requests mostly ended as timeouts or `503 "model is currently experiencing high demand"`, so most requests came back as a graceful `ai_error`. The per-attempt timeout is 15s with at most one retry; it was deliberately not raised, because it interacts with the 60s function limit and the project's no-extra-retries rule. Enabling billing on the Gemini project, or choosing a different `GEMINI_MODEL`, is the lever; raising the timeout is a decision for the operator.
 
 - **Ranking is deterministic (token-overlap + official-domain heuristics), not LLM-judged.** The original spec described the LLM as a judge over candidates; this was scoped down to a non-AI heuristic to keep per-request AI cost bounded and latency predictable (see "Cost control" above). It works well for clearly-named pointers (repos, books, packages) and less precisely for ambiguous or very generic names.
 - **Gemini's `responseJsonSchema` enforces an undocumented complexity limit.** A schema whose array `maxItems` × nested-object complexity crosses some internal threshold is rejected with a bare `400 INVALID_ARGUMENT` (no field-level detail) — empirically found while building Stage B (see `lib/schemas/pipeline/understanding.ts`). `pointers`/`searchPlans` are capped at 8 items and `evidence` at 3, verified safe; raising these caps without re-testing against the live API risks silently breaking every request.

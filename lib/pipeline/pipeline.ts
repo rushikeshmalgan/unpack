@@ -21,6 +21,15 @@ import type { AIProviderError } from "@/lib/ai/providerError";
 const POINTER_CONCURRENCY = 4;
 const MIN_SUFFICIENT_SIGNAL_LENGTH = 20;
 
+// Everything from ingestion through link-finding has to fit inside the
+// route's `maxDuration` (60s) or the platform kills the request and the user
+// gets an opaque error instead of anything. The AI call alone can take 45s on
+// a bad day, so link-finding gets whatever is left of this budget and returns
+// partial results rather than running past it.
+export const PIPELINE_BUDGET_MS = 50_000;
+
+const TIMED_OUT_REASON = "Ran out of time while searching for this one — try again.";
+
 const CREATOR_OWNED_RESOURCE_TYPES = new Set(["template", "prompt", "design_asset"]);
 const CREATOR_OWNED_LANGUAGE = /\b(my|i'll send|i will send|i made|dm you|i created|my own)\b/i;
 
@@ -122,6 +131,7 @@ export type PipelineOutcome =
   | { status: "ok"; result: PipelineResult };
 
 export async function runPipeline(input: PipelineInput): Promise<PipelineOutcome> {
+  const deadlineAt = Date.now() + PIPELINE_BUDGET_MS;
   const validated = validateInstagramUrl(input.url);
   if (!validated.ok) {
     return { status: "invalid_url", message: describeUrlError(validated.reason) };
@@ -161,8 +171,68 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineOutcome
     return { status: "ai_error", error: understanding.error, signals };
   }
 
-  const result = await assembleResult(signals, understanding.data, input.mode, { locale: input.locale });
+  const result = await assembleResult(signals, understanding.data, input.mode, { locale: input.locale }, deadlineAt);
   return { status: "ok", result };
+}
+
+type PointerOutcome =
+  | { kind: "resolved"; result: PointerResult }
+  | { kind: "creator_owned"; item: CreatorOwnedItem }
+  | { kind: "unresolved"; item: UnresolvedItem; timedOut?: boolean };
+
+function unresolvedOutcome(pointer: Pointer, reason: string, timedOut = false): PointerOutcome {
+  return { kind: "unresolved", item: { pointerId: pointer.id, name: pointer.name, reason }, timedOut };
+}
+
+// Runs `work` unless the budget is already spent, and stops waiting for it
+// once the budget runs out. It cannot cancel `work` (the in-flight requests
+// finish on their own and their results are discarded), but the caller gets
+// its answer on time.
+async function withinBudget<T>(deadlineAt: number, work: () => Promise<T>, onExpired: () => T): Promise<T> {
+  const remaining = deadlineAt - Date.now();
+  if (remaining <= 0) return onExpired();
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(onExpired()), remaining);
+  });
+  try {
+    return await Promise.race([work(), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function resolvePointer(pointer: Pointer, ctx: ResolverContext): Promise<PointerOutcome> {
+  if (isLikelyCreatorOwned(pointer)) {
+    const alternatives = await findAlternatives(pointer, ctx);
+    return {
+      kind: "creator_owned",
+      item: {
+        name: pointer.name,
+        note: "This looks like the creator's own asset, gated behind a comment/DM — it can't be retrieved directly.",
+        alternatives,
+      },
+    };
+  }
+
+  const { candidates, issues } = await resolveCandidates(pointer, ctx);
+  const links = await verifyAndRank(pointer, candidates);
+
+  if (links.length === 0) {
+    // "Couldn't search" and "searched, nothing matched" are different
+    // outcomes; say which, so a rate limit doesn't read as "doesn't exist".
+    const reason =
+      issues.length > 0
+        ? `Not found, and some sources couldn't be searched (${issues.join("; ")}).`
+        : "No verified, live match was found.";
+    return unresolvedOutcome(pointer, reason);
+  }
+
+  return {
+    kind: "resolved",
+    result: { pointerId: pointer.id, kind: pointer.kind, resourceType: pointer.resourceType, name: pointer.name, links },
+  };
 }
 
 async function assembleResult(
@@ -170,39 +240,49 @@ async function assembleResult(
   understanding: UnderstandingResult,
   mode: "exact" | "explore",
   ctx: ResolverContext,
+  deadlineAt: number,
 ): Promise<PipelineResult> {
   const results: PointerResult[] = [];
   const creatorOwned: CreatorOwnedItem[] = [];
   const unresolved: UnresolvedItem[] = [];
 
-  await mapWithConcurrency(understanding.pointers, POINTER_CONCURRENCY, async (pointer) => {
-    if (isLikelyCreatorOwned(pointer)) {
-      const alternatives = await findAlternatives(pointer, ctx);
-      creatorOwned.push({
-        name: pointer.name,
-        note: "This looks like the creator's own asset, gated behind a comment/DM — it can't be retrieved directly.",
-        alternatives,
-      });
-      return;
+  // Outcomes come back in the reel's own order (mapWithConcurrency preserves
+  // it), so "5 tools" is listed as the creator listed them rather than in
+  // whatever order the lookups happened to finish. One pointer failing, or
+  // running out of time, never takes the others down with it.
+  const outcomes = await mapWithConcurrency(understanding.pointers, POINTER_CONCURRENCY, async (pointer) => {
+    try {
+      return await withinBudget(
+        deadlineAt,
+        () => resolvePointer(pointer, ctx),
+        () => unresolvedOutcome(pointer, TIMED_OUT_REASON, true),
+      );
+    } catch (err) {
+      console.error("[pipeline] pointer failed:", err instanceof Error ? err.name : "unknown");
+      return unresolvedOutcome(pointer, "Something went wrong while searching for this one.");
     }
-
-    const { candidates, issues } = await resolveCandidates(pointer, ctx);
-    const links = await verifyAndRank(pointer, candidates);
-
-    if (links.length === 0) {
-      // "Couldn't search" and "searched, nothing matched" are different
-      // outcomes; say which, so a rate limit doesn't read as "doesn't exist".
-      const reason =
-        issues.length > 0
-          ? `Not found, and some sources couldn't be searched (${issues.join("; ")}).`
-          : "No verified, live match was found.";
-      unresolved.push({ pointerId: pointer.id, name: pointer.name, reason });
-      return;
-    }
-
-    results.push({ pointerId: pointer.id, kind: pointer.kind, resourceType: pointer.resourceType, name: pointer.name, links });
   });
 
+  let timedOut = false;
+  for (const outcome of outcomes) {
+    if (outcome.kind === "resolved") results.push(outcome.result);
+    else if (outcome.kind === "creator_owned") creatorOwned.push(outcome.item);
+    else {
+      unresolved.push(outcome.item);
+      timedOut ||= outcome.timedOut === true;
+    }
+  }
+
+  const warnings: string[] = [];
+  if (signals.status === "partial" || signals.status === "manual_only") {
+    warnings.push(`Limited signal available (missing: ${signals.missing.join(", ") || "none"}).`);
+  }
+  if (timedOut) {
+    warnings.push("Some links took too long to look up and were skipped — try again for those.");
+  }
+
+  // [] means "looked for related reading and found none"; null means "didn't
+  // look" (exact mode with pointers to resolve).
   let explore: LinkResult[] | null = null;
   const shouldExplore = mode === "explore" || understanding.pointers.length === 0;
   if (shouldExplore) {
@@ -216,13 +296,19 @@ async function assembleResult(
       evidence: [],
       confidence: 0.5,
     };
-    const { candidates } = await resolveCandidates(explorePointer, ctx);
-    explore = await verifyAndRank(explorePointer, candidates, { maxResults: 5 });
-  }
-
-  const warnings: string[] = [];
-  if (signals.status === "partial" || signals.status === "manual_only") {
-    warnings.push(`Limited signal available (missing: ${signals.missing.join(", ") || "none"}).`);
+    const found = await withinBudget(
+      deadlineAt,
+      async () => {
+        const { candidates, issues } = await resolveCandidates(explorePointer, ctx);
+        return { links: await verifyAndRank(explorePointer, candidates, { maxResults: 5 }), issues };
+      },
+      () => ({ links: [] as LinkResult[], issues: ["it ran out of time"] }),
+    );
+    explore = found.links;
+    if (explore.length === 0) {
+      const why = found.issues.length > 0 ? ` (${found.issues.join("; ")})` : "";
+      warnings.push(`Couldn't find related reading for this topic${why}.`);
+    }
   }
 
   return {
@@ -231,6 +317,7 @@ async function assembleResult(
       creator: signals.creatorUsername,
       captionPreview: signals.caption ? signals.caption.slice(0, 160) : null,
       reelType: understanding.reelType,
+      topic: understanding.topicIfNoPointers,
     },
     creatorPromise: understanding.creatorPromise,
     results,

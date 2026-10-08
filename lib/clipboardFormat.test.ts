@@ -125,7 +125,7 @@ function link(overrides: Partial<LinkResult> = {}): LinkResult {
 
 function fixturePipelineResult(overrides: Partial<PipelineResult> = {}): PipelineResult {
   return {
-    reel: { url: "https://www.instagram.com/reel/abc/", creator: "someuser", captionPreview: "caption", reelType: "recommendation_list" },
+    reel: { url: "https://www.instagram.com/reel/abc/", creator: "someuser", captionPreview: "caption", reelType: "recommendation_list", topic: null },
     creatorPromise: null,
     results: [{ pointerId: "p1", kind: "explicit", resourceType: "web_tool", name: "Excalidraw", links: [link()] }],
     creatorOwned: [],
