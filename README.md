@@ -81,7 +81,8 @@ export interface Resolver {
 1. Create `lib/pipeline/resolvers/yourResolver.ts` — call a real search API, map its results to `Candidate[]` (never invent a URL).
 2. Add it to the `RESOLVERS` array in `lib/pipeline/resolvers/registry.ts`, above `webSearchResolver` (which must stay last — it's the universal fallback).
 3. If `resourceType` needs a new canonical token, add it to `KNOWN_RESOURCE_TYPES` in `lib/schemas/pipeline/understanding.ts` — this list is interpolated directly into the Stage B prompt (`prompts/understand.ts`) so the model knows the exact string to emit (see "Known limitations" — this match is exact-string, not fuzzy).
-4. If the resolver needs a key, read it from `process.env` inside `search()`/a helper and return `[]` gracefully when absent (see any keyed resolver for the pattern) — never throw, never crash the whole pipeline over one missing key.
+4. Make requests through `fetchSourceJson` / `fetchSourceText` (`lib/pipeline/resolvers/http.ts`) rather than raw `fetch`. They apply a timeout and call `ctx.reportIssue` when the source is rate-limited or down, which is how the pipeline tells "couldn't search" apart from "searched, found nothing" (and avoids caching the former). If the resolver needs a key, read it from `process.env`, call `ctx.reportIssue?.("… isn't enabled on this server")` and return `[]` when it's absent — never throw, never crash the whole pipeline over one missing key.
+5. Optionally set `aliases` (other names the result is known by) and `popularity` (a raw count like stars, compared only within your source) on each `Candidate` to sharpen ranking.
 
 That's the whole contract: the pipeline, registry routing, verification, ranking, and dedup are all resourceType-agnostic and require no changes.
 
@@ -89,7 +90,7 @@ That's the whole contract: the pipeline, registry routing, verification, ranking
 
 | Resolver | resourceType(s) | Needs a key? |
 |---|---|---|
-| GitHub | `github_repo`, `library_package` | No (optional `GITHUB_TOKEN` raises the rate limit) |
+| GitHub | `github_repo`, `library_package` | No, but `GITHUB_TOKEN` is effectively required in production — unauthenticated search is 10 requests/minute per IP, which shared serverless egress exhausts |
 | npm | `library_package` | No |
 | Open Library | `book` | No |
 | arXiv | `research_paper` | No |
@@ -98,7 +99,7 @@ That's the whole contract: the pipeline, registry routing, verification, ranking
 | YouTube Data API | `video`, `channel`, `playlist` | Yes — `YOUTUBE_API_KEY` |
 | Tavily web search (universal fallback) | anything unmatched above | Yes — `TAVILY_API_KEY` |
 
-Any resolver whose key is missing is skipped gracefully; the response's `warnings` array and server logs note which resolvers were unavailable, but the request never fails because of it.
+A resolver that can't search — key missing, rate-limited, or the source is down — is skipped gracefully and never fails the request. When that leaves a pointer without any link, its "Couldn't find" row says which sources couldn't be searched ("Not found, and some sources couldn't be searched (GitHub search is rate-limited)"), so a rate limit is never presented as "this doesn't exist". Such failed lookups are also never cached, so a transient outage isn't remembered for the cache TTL.
 
 ---
 

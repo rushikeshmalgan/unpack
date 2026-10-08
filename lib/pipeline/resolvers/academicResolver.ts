@@ -1,7 +1,6 @@
-import type { Candidate, Resolver } from "@/lib/pipeline/resolvers/types";
+import type { Candidate, Resolver, ResolverContext } from "@/lib/pipeline/resolvers/types";
+import { fetchSourceText } from "@/lib/pipeline/resolvers/http";
 import type { Pointer } from "@/lib/schemas/pipeline/understanding";
-
-const TIMEOUT_MS = 8000;
 
 // arXiv's API returns Atom XML, not JSON — regex-extract the handful of
 // fields we need rather than pulling in a full XML parser dependency for
@@ -20,21 +19,13 @@ function parseArxivEntries(xml: string): Candidate[] {
 // null = the request itself failed; [] = arXiv answered with no matches. The
 // difference matters: only a genuine "no matches" should trigger the fallback
 // query (retrying a failing service just doubles the load on it).
-async function fetchArxiv(searchQuery: string): Promise<Candidate[] | null> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-  try {
-    const res = await fetch(
-      `https://export.arxiv.org/api/query?search_query=${encodeURIComponent(searchQuery)}&max_results=5`,
-      { signal: controller.signal },
-    );
-    if (!res.ok) return null;
-    return parseArxivEntries(await res.text());
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
+async function fetchArxiv(searchQuery: string, ctx: ResolverContext): Promise<Candidate[] | null> {
+  const xml = await fetchSourceText(
+    ctx,
+    "arXiv search",
+    `https://export.arxiv.org/api/query?search_query=${encodeURIComponent(searchQuery)}&max_results=5`,
+  );
+  return xml === null ? null : parseArxivEntries(xml);
 }
 
 // A pointer name is usually a paper title, and arXiv's loose `all:` match on
@@ -42,16 +33,16 @@ async function fetchArxiv(searchQuery: string): Promise<Candidate[] | null> {
 // unrelated papers and missed the real one entirely. A quoted title-field
 // phrase puts it first. If the name isn't an exact title (the model
 // paraphrased), fall back to requiring every significant word somewhere.
-async function searchArxiv(name: string): Promise<Candidate[]> {
+async function searchArxiv(name: string, ctx: ResolverContext): Promise<Candidate[]> {
   const phrase = name.replace(/"/g, " ").replace(/\s+/g, " ").trim();
   if (!phrase) return [];
 
-  const exact = await fetchArxiv(`ti:"${phrase}"`);
+  const exact = await fetchArxiv(`ti:"${phrase}"`, ctx);
   if (exact === null || exact.length > 0) return exact ?? [];
 
   const terms = (phrase.match(/[\p{L}\p{N}]+/gu) ?? []).filter((t) => t.length > 2).slice(0, 6);
   if (terms.length === 0) return [];
-  return (await fetchArxiv(terms.map((t) => `all:${t}`).join(" AND "))) ?? [];
+  return (await fetchArxiv(terms.map((t) => `all:${t}`).join(" AND "), ctx)) ?? [];
 }
 
 export const academicResolver: Resolver = {
@@ -59,7 +50,7 @@ export const academicResolver: Resolver = {
   handles(resourceType: string) {
     return resourceType === "research_paper";
   },
-  async search(pointer: Pointer): Promise<Candidate[]> {
-    return searchArxiv(pointer.name);
+  async search(pointer: Pointer, ctx: ResolverContext): Promise<Candidate[]> {
+    return searchArxiv(pointer.name, ctx);
   },
 };

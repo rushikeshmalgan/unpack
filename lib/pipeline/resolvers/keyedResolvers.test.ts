@@ -39,6 +39,21 @@ describe("youtubeResolver", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("says so when the key is missing, so a skipped resolver isn't mistaken for 'nothing found'", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+    const reportIssue = vi.fn();
+    await youtubeResolver.search(fixturePointer(), { reportIssue });
+    expect(reportIssue).toHaveBeenCalledExactlyOnceWith("YouTube search isn't enabled on this server");
+  });
+
+  it("reports an exhausted quota (403) instead of returning a silent empty list", async () => {
+    vi.stubEnv("YOUTUBE_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 403, json: async () => ({}) } as Response));
+    const reportIssue = vi.fn();
+    expect(await youtubeResolver.search(fixturePointer(), { reportIssue })).toEqual([]);
+    expect(reportIssue).toHaveBeenCalledExactlyOnceWith("YouTube search is rate-limited");
+  });
+
   it("parses a real-shaped search response and builds the correct watch URL", async () => {
     vi.stubEnv("YOUTUBE_API_KEY", "test-key");
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({
@@ -65,6 +80,24 @@ describe("webSearchResolver", () => {
     const results = await webSearchResolver.search(fixturePointer({ resourceType: "website" }), {});
     expect(results).toEqual([]);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("says so when the key is missing", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+    const reportIssue = vi.fn();
+    await webSearchResolver.search(fixturePointer({ resourceType: "website" }), { reportIssue });
+    expect(reportIssue).toHaveBeenCalledExactlyOnceWith("Web search isn't enabled on this server");
+  });
+
+  it("sends the key as a Bearer token on a POST", async () => {
+    vi.stubEnv("TAVILY_API_KEY", "test-key");
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ results: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    await webSearchResolver.search(fixturePointer({ resourceType: "web_tool", name: "Excalidraw" }), {});
+    const init = fetchMock.mock.calls[0][1];
+    expect(init.method).toBe("POST");
+    expect(init.headers.Authorization).toBe("Bearer test-key");
+    expect(JSON.parse(init.body).query).toBe("Excalidraw official site");
   });
 
   it("parses a real-shaped Tavily response", async () => {

@@ -21,6 +21,11 @@ export interface Candidate {
 
 export interface ResolverContext {
   locale?: string;
+  // A resolver calls this when it could not search (rate-limited, down, key
+  // missing) as opposed to searching and finding nothing. The pipeline uses
+  // it to say "couldn't search X" instead of "not found", and to avoid
+  // caching an empty answer that is really a failure.
+  reportIssue?: (message: string) => void;
 }
 
 export interface Resolver {

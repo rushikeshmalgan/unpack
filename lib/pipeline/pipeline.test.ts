@@ -187,6 +187,116 @@ describe("runPipeline", () => {
     expect(ingestReelMock).not.toHaveBeenCalled();
   });
 
+  describe("resolver failures vs. genuine misses", () => {
+    function pointerFixture(overrides: Record<string, unknown> = {}) {
+      return {
+        id: "p1", kind: "explicit" as const, resourceType: "github_repo", name: "react",
+        attributes: { creator: null, year: null, topic: null, language: null, location: null, visibleUrl: null, price: null },
+        evidence: [], confidence: 0.9,
+        ...overrides,
+      };
+    }
+    const understandingWith = (pointer: ReturnType<typeof pointerFixture>) =>
+      ({ ok: true, data: baseUnderstanding({ pointers: [pointer] }) });
+
+    // A resolver that behaves like GitHub when rate-limited: reports why, returns [].
+    const rateLimited = {
+      id: "github",
+      handles: () => true,
+      search: vi.fn(async (_p: unknown, ctx: { reportIssue?: (m: string) => void }) => {
+        ctx.reportIssue?.("GitHub search is rate-limited");
+        return [];
+      }),
+    };
+    // A resolver that searched fine and simply found nothing.
+    const genuineMiss = { id: "npm", handles: () => true, search: vi.fn(async () => []) };
+
+    beforeEach(() => {
+      rateLimited.search.mockClear();
+      genuineMiss.search.mockClear();
+      ingestReelMock.mockResolvedValue({ ok: true, signals: baseSignals() });
+    });
+
+    it("tells the user a source couldn't be searched, instead of just claiming nothing was found", async () => {
+      resolversForMock.mockReturnValue([rateLimited]);
+      understandReelMock.mockResolvedValue(understandingWith(pointerFixture()));
+
+      const outcome = await runPipeline({ url: VALID_URL, manual: {}, mode: "exact" });
+      if (outcome.status !== "ok") throw new Error("expected ok");
+      expect(outcome.result.unresolved[0].reason).toBe(
+        "Not found, and some sources couldn't be searched (GitHub search is rate-limited).",
+      );
+    });
+
+    it("keeps the plain reason when every source searched fine and nothing matched", async () => {
+      resolversForMock.mockReturnValue([genuineMiss]);
+      understandReelMock.mockResolvedValue(understandingWith(pointerFixture()));
+
+      const outcome = await runPipeline({ url: VALID_URL, manual: {}, mode: "exact" });
+      if (outcome.status !== "ok") throw new Error("expected ok");
+      expect(outcome.result.unresolved[0].reason).toBe("No verified, live match was found.");
+    });
+
+    it("does not cache the empty answer of a call that failed, but does cache a genuine miss", async () => {
+      resolversForMock.mockReturnValue([rateLimited, genuineMiss]);
+      understandReelMock.mockResolvedValue(understandingWith(pointerFixture()));
+
+      await runPipeline({ url: VALID_URL, manual: {}, mode: "exact" });
+
+      const cachedFor = setCachedSearchMock.mock.calls.map((c) => c[0]);
+      expect(cachedFor).toEqual(["npm"]);
+    });
+
+    it("survives a resolver that throws, and says which source failed", async () => {
+      const exploding = { id: "arxiv", handles: () => true, search: vi.fn(async () => { throw new Error("boom"); }) };
+      resolversForMock.mockReturnValue([exploding]);
+      understandReelMock.mockResolvedValue(understandingWith(pointerFixture({ resourceType: "research_paper" })));
+
+      const outcome = await runPipeline({ url: VALID_URL, manual: {}, mode: "exact" });
+      if (outcome.status !== "ok") throw new Error("expected ok");
+      expect(outcome.result.unresolved[0].reason).toContain("arxiv failed unexpectedly");
+    });
+
+    it("does not mention a failed source when another source did find links", async () => {
+      resolversForMock.mockReturnValue([rateLimited]);
+      verifyAndRankMock.mockResolvedValue([
+        { title: "react", url: "https://www.npmjs.com/package/react", source: "npmjs.com", reason: "match", confidence: "high" },
+      ]);
+      understandReelMock.mockResolvedValue(understandingWith(pointerFixture()));
+
+      const outcome = await runPipeline({ url: VALID_URL, manual: {}, mode: "exact" });
+      if (outcome.status !== "ok") throw new Error("expected ok");
+      expect(outcome.result.results).toHaveLength(1);
+      expect(outcome.result.unresolved).toHaveLength(0);
+    });
+
+    it("keys the search cache on everything the query depends on, so 'Cafe Zoe' in Goa never gets Paris's cached answer", async () => {
+      resolversForMock.mockReturnValue([genuineMiss]);
+      const keys: string[] = [];
+      getCachedSearchMock.mockImplementation(async (_id: string, key: string) => { keys.push(key); return null; });
+
+      for (const location of ["Goa", "Paris"]) {
+        understandReelMock.mockResolvedValue(understandingWith(pointerFixture({ resourceType: "place", name: "Cafe Zoe", attributes: { creator: null, year: null, topic: null, language: null, location, visibleUrl: null, price: null } })));
+        await runPipeline({ url: VALID_URL, manual: {}, mode: "exact", locale: "en" });
+      }
+
+      expect(keys).toEqual(["Cafe Zoe|place|Goa|en", "Cafe Zoe|place|Paris|en"]);
+    });
+
+    it("also separates the same name searched as a different resource type", async () => {
+      resolversForMock.mockReturnValue([genuineMiss]);
+      const keys: string[] = [];
+      getCachedSearchMock.mockImplementation(async (_id: string, key: string) => { keys.push(key); return null; });
+
+      for (const resourceType of ["github_repo", "library_package"]) {
+        understandReelMock.mockResolvedValue(understandingWith(pointerFixture({ resourceType })));
+        await runPipeline({ url: VALID_URL, manual: {}, mode: "exact" });
+      }
+
+      expect(new Set(keys).size).toBe(2);
+    });
+  });
+
   describe("ingestion cache vs. user-pasted text", () => {
     it("never reads the shared cache when the user pasted something, so a stale entry cannot override their input", async () => {
       getCachedIngestionMock.mockResolvedValue(baseSignals({ caption: "SOMEONE ELSE'S CACHED CAPTION" }));

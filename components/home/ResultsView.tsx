@@ -105,7 +105,10 @@ function UnresolvedRow({ item }: { item: UnresolvedItem }) {
   const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(item.name)}`;
   return (
     <li className="flex items-center justify-between gap-2 rounded-lg border border-border bg-background px-3 py-2 text-sm">
-      <span className="text-foreground">{item.name}</span>
+      <span className="min-w-0">
+        <span className="block text-foreground">{item.name}</span>
+        <span className="block text-xs text-muted-foreground">{item.reason}</span>
+      </span>
       <a
         href={searchUrl}
         target="_blank"

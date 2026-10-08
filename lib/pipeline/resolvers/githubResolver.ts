@@ -1,7 +1,6 @@
-import type { Candidate, Resolver } from "@/lib/pipeline/resolvers/types";
+import type { Candidate, Resolver, ResolverContext } from "@/lib/pipeline/resolvers/types";
+import { fetchSourceJson } from "@/lib/pipeline/resolvers/http";
 import type { Pointer } from "@/lib/schemas/pipeline/understanding";
-
-const TIMEOUT_MS = 8000;
 
 interface GitHubItem {
   name: string;
@@ -14,35 +13,31 @@ interface GitHubItem {
   updated_at: string;
 }
 
-async function searchGitHub(query: string): Promise<Candidate[]> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-  try {
-    const headers: Record<string, string> = { Accept: "application/vnd.github+json" };
-    if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+// Unauthenticated GitHub search is capped at 10 requests/minute per IP — on
+// shared serverless egress that is effectively always exhausted, so a
+// GITHUB_TOKEN (30/min, and per-token rather than per-IP) is what makes this
+// resolver dependable in production.
+async function searchGitHub(query: string, ctx: ResolverContext): Promise<Candidate[]> {
+  const headers: Record<string, string> = { Accept: "application/vnd.github+json" };
+  if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
 
-    const res = await fetch(`https://api.github.com/search/repositories?q=${encodeURIComponent(query)}&per_page=5`, {
-      headers,
-      signal: controller.signal,
-    });
-    if (!res.ok) return [];
+  const body = await fetchSourceJson<{ items?: GitHubItem[] }>(
+    ctx,
+    "GitHub search",
+    `https://api.github.com/search/repositories?q=${encodeURIComponent(query)}&per_page=5`,
+    { headers },
+  );
 
-    const body = (await res.json()) as { items?: GitHubItem[] };
-    return (body.items ?? []).map((item) => ({
-      url: item.html_url,
-      title: item.full_name,
-      aliases: [item.name],
-      popularity: item.stargazers_count,
-      source: "github.com",
-      publishedDate: item.updated_at,
-      snippet: item.description,
-      meta: { stars: item.stargazers_count, language: item.language, owner: item.owner.login },
-    }));
-  } catch {
-    return [];
-  } finally {
-    clearTimeout(timer);
-  }
+  return (body?.items ?? []).map((item) => ({
+    url: item.html_url,
+    title: item.full_name,
+    aliases: [item.name],
+    popularity: item.stargazers_count,
+    source: "github.com",
+    publishedDate: item.updated_at,
+    snippet: item.description,
+    meta: { stars: item.stargazers_count, language: item.language, owner: item.owner.login },
+  }));
 }
 
 export const githubResolver: Resolver = {
@@ -50,7 +45,7 @@ export const githubResolver: Resolver = {
   handles(resourceType: string) {
     return resourceType === "github_repo" || resourceType === "library_package";
   },
-  async search(pointer: Pointer): Promise<Candidate[]> {
-    return searchGitHub(pointer.name);
+  async search(pointer: Pointer, ctx: ResolverContext): Promise<Candidate[]> {
+    return searchGitHub(pointer.name, ctx);
   },
 };

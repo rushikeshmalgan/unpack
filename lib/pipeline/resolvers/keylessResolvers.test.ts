@@ -26,6 +26,7 @@ function jsonResponse(body: unknown, ok = true): Response {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 describe("githubResolver", () => {
@@ -52,6 +53,28 @@ describe("githubResolver", () => {
   it("returns an empty array (not a throw) on a non-ok response", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({}, false)));
     expect(await githubResolver.search(fixturePointer(), {})).toEqual([]);
+  });
+
+  it("reports the unauthenticated rate limit (403) rather than letting it pass for 'no repos found'", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 403, json: async () => ({}) } as Response));
+    const reportIssue = vi.fn();
+    expect(await githubResolver.search(fixturePointer(), { reportIssue })).toEqual([]);
+    expect(reportIssue).toHaveBeenCalledExactlyOnceWith("GitHub search is rate-limited");
+  });
+
+  it("does not report an issue when GitHub simply has no matches", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ items: [] })));
+    const reportIssue = vi.fn();
+    expect(await githubResolver.search(fixturePointer(), { reportIssue })).toEqual([]);
+    expect(reportIssue).not.toHaveBeenCalled();
+  });
+
+  it("sends the token when one is configured", async () => {
+    vi.stubEnv("GITHUB_TOKEN", "ghp_test");
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    await githubResolver.search(fixturePointer(), {});
+    expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe("Bearer ghp_test");
   });
 
   it("returns an empty array on a network failure", async () => {

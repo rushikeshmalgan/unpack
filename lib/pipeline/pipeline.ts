@@ -34,28 +34,51 @@ function isLikelyCreatorOwned(pointer: Pointer): boolean {
   return CREATOR_OWNED_LANGUAGE.test(pointer.name);
 }
 
-async function resolveCandidates(pointer: Pointer, ctx: ResolverContext): Promise<Candidate[]> {
-  const resolvers = resolversFor(pointer.resourceType);
-  const queries = pointer.evidence.length > 0 ? [pointer.name] : [pointer.name];
+// Everything a resolver's query can depend on, not just the name: Nominatim
+// searches name + location (+ locale) and the web-search hint depends on the
+// resourceType, so keying on name alone would serve "Cafe Zoe" in Goa the
+// cached answer for "Cafe Zoe" in Paris.
+function searchCacheKey(pointer: Pointer, ctx: ResolverContext): string {
+  return [pointer.name, pointer.resourceType, pointer.attributes.location ?? "", ctx.locale ?? ""].join("|");
+}
+
+async function resolveCandidates(
+  pointer: Pointer,
+  ctx: ResolverContext,
+): Promise<{ candidates: Candidate[]; issues: string[] }> {
+  const issues = new Set<string>();
+  const cacheKey = searchCacheKey(pointer, ctx);
 
   const lists = await Promise.all(
-    resolvers.flatMap((resolver) =>
-      queries.map(async (query) => {
-        const cached = await getCachedSearch<Candidate[]>(resolver.id, query);
-        if (cached) return cached;
-        try {
-          const found = await resolver.search({ ...pointer, name: query }, ctx);
-          await setCachedSearch(resolver.id, query, found);
-          return found;
-        } catch (err) {
-          console.error(`[pipeline] resolver "${resolver.id}" threw:`, err instanceof Error ? err.name : "unknown");
-          return [];
-        }
-      }),
-    ),
+    resolversFor(pointer.resourceType).map(async (resolver) => {
+      const cached = await getCachedSearch<Candidate[]>(resolver.id, cacheKey);
+      if (cached) return cached;
+
+      let couldNotSearch = false;
+      const callCtx: ResolverContext = {
+        ...ctx,
+        reportIssue: (message) => {
+          couldNotSearch = true;
+          issues.add(message);
+        },
+      };
+
+      try {
+        const found = await resolver.search(pointer, callCtx);
+        // An empty list from a call that failed (rate limit, outage, missing
+        // key) is not "no results" — caching it would hide the pointer for the
+        // whole TTL after the problem is gone.
+        if (!couldNotSearch) await setCachedSearch(resolver.id, cacheKey, found);
+        return found;
+      } catch (err) {
+        console.error(`[pipeline] resolver "${resolver.id}" threw:`, err instanceof Error ? err.name : "unknown");
+        issues.add(`${resolver.id} failed unexpectedly`);
+        return [];
+      }
+    }),
   );
 
-  return dedupeCandidates(lists.flat());
+  return { candidates: dedupeCandidates(lists.flat()), issues: [...issues] };
 }
 
 async function findAlternatives(pointer: Pointer, ctx: ResolverContext): Promise<LinkResult[]> {
@@ -163,11 +186,17 @@ async function assembleResult(
       return;
     }
 
-    const candidates = await resolveCandidates(pointer, ctx);
+    const { candidates, issues } = await resolveCandidates(pointer, ctx);
     const links = await verifyAndRank(pointer, candidates);
 
     if (links.length === 0) {
-      unresolved.push({ pointerId: pointer.id, name: pointer.name, reason: "No verified, live match was found." });
+      // "Couldn't search" and "searched, nothing matched" are different
+      // outcomes; say which, so a rate limit doesn't read as "doesn't exist".
+      const reason =
+        issues.length > 0
+          ? `Not found, and some sources couldn't be searched (${issues.join("; ")}).`
+          : "No verified, live match was found.";
+      unresolved.push({ pointerId: pointer.id, name: pointer.name, reason });
       return;
     }
 
@@ -187,7 +216,7 @@ async function assembleResult(
       evidence: [],
       confidence: 0.5,
     };
-    const candidates = await resolveCandidates(explorePointer, ctx);
+    const { candidates } = await resolveCandidates(explorePointer, ctx);
     explore = await verifyAndRank(explorePointer, candidates, { maxResults: 5 });
   }
 
