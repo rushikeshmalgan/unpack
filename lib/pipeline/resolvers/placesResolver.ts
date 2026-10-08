@@ -1,5 +1,5 @@
 import type { Candidate, Resolver, ResolverContext } from "@/lib/pipeline/resolvers/types";
-import { fetchSourceJson } from "@/lib/pipeline/resolvers/http";
+import { fetchSourceJson, resolverUserAgent } from "@/lib/pipeline/resolvers/http";
 import type { Pointer } from "@/lib/schemas/pipeline/understanding";
 
 interface NominatimResult {
@@ -22,7 +22,7 @@ async function searchNominatim(query: string, ctx: ResolverContext): Promise<Can
     ctx,
     "OpenStreetMap search",
     `https://nominatim.openstreetmap.org/search?${params.toString()}`,
-    { headers: { "User-Agent": "UnpackResourceFinder/1.0 (reel-to-resource lookup)" } },
+    { headers: { "User-Agent": resolverUserAgent() } },
   );
 
   return (results ?? []).map((r) => ({

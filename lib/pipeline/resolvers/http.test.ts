@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchSourceJson, fetchSourceText } from "@/lib/pipeline/resolvers/http";
+import { fetchSourceJson, fetchSourceText, resolverUserAgent } from "@/lib/pipeline/resolvers/http";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -76,6 +76,123 @@ describe("fetchSourceJson / fetchSourceText", () => {
   it("works when the caller supplies no reportIssue callback", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(500)));
     expect(await fetchSourceJson({}, "x", "https://api.example/x")).toBeNull();
+  });
+
+  describe("backing off a host that said no", () => {
+    // Each test uses its own hostname: the back-off table is per-process state.
+    const rateLimited = (headers: Record<string, string>, status = 429) =>
+      ({ ok: false, status, headers: new Headers(headers), json: async () => ({}) }) as unknown as Response;
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("stops calling a host for the Retry-After period instead of hammering it", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      const fetchMock = vi.fn().mockResolvedValue(rateLimited({ "retry-after": "4" }));
+      vi.stubGlobal("fetch", fetchMock);
+      const reportIssue = vi.fn();
+
+      await fetchSourceJson({ reportIssue }, "Wikidata", "https://backoff-a.example/w/api.php?x=1");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // A second lookup — even a different URL on the same host — makes no request.
+      await fetchSourceJson({ reportIssue }, "Wikidata", "https://backoff-a.example/w/api.php?x=2");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(reportIssue).toHaveBeenLastCalledWith("Wikidata is rate-limited");
+    });
+
+    it("resumes once the Retry-After period has passed", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(rateLimited({ "retry-after": "4" }))
+        .mockResolvedValueOnce(response(200, { ok: true }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      await fetchSourceJson({}, "Wikidata", "https://backoff-b.example/x");
+      vi.setSystemTime(new Date("2026-01-01T00:00:05Z"));
+      expect(await fetchSourceJson({}, "Wikidata", "https://backoff-b.example/x")).toEqual({ ok: true });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("only blocks the host that complained", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(rateLimited({ "retry-after": "30" }))
+        .mockResolvedValueOnce(response(200, { fine: true }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      await fetchSourceJson({}, "A", "https://backoff-c1.example/x");
+      expect(await fetchSourceJson({}, "B", "https://backoff-c2.example/x")).toEqual({ fine: true });
+    });
+
+    it("caps an absurd Retry-After at a minute", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(rateLimited({ "retry-after": "86400" }))
+        .mockResolvedValueOnce(response(200, { back: true }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      await fetchSourceJson({}, "x", "https://backoff-d.example/x");
+      vi.setSystemTime(new Date("2026-01-01T00:01:01Z"));
+      expect(await fetchSourceJson({}, "x", "https://backoff-d.example/x")).toEqual({ back: true });
+    });
+
+    it("honors GitHub's primary limit: a 403 with remaining=0 blocks until the reset time", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      const resetEpochSeconds = String(Math.floor(Date.now() / 1000) + 20);
+      const fetchMock = vi.fn().mockResolvedValue(
+        rateLimited({ "x-ratelimit-remaining": "0", "x-ratelimit-reset": resetEpochSeconds }, 403),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      await fetchSourceJson({}, "GitHub search", "https://backoff-e.example/search");
+      await fetchSourceJson({}, "GitHub search", "https://backoff-e.example/search");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not block on an ordinary 500, or on a 403 that isn't a rate limit", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(rateLimited({}, 500));
+      vi.stubGlobal("fetch", fetchMock);
+      await fetchSourceJson({}, "x", "https://backoff-f.example/x");
+      await fetchSourceJson({}, "x", "https://backoff-f.example/x");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      const forbidden = vi.fn().mockResolvedValue(rateLimited({}, 403));
+      vi.stubGlobal("fetch", forbidden);
+      await fetchSourceJson({}, "x", "https://backoff-g.example/x");
+      await fetchSourceJson({}, "x", "https://backoff-g.example/x");
+      expect(forbidden).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("resolverUserAgent", () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it("identifies the app, and adds operator contact details when configured (as Wikimedia/OSM policies ask)", () => {
+      vi.stubEnv("OPERATOR_CONTACT", "ops@example.com");
+      expect(resolverUserAgent()).toBe("UnpackResourceFinder/1.0 (reel-to-resource lookup; ops@example.com)");
+    });
+
+    it("works without a contact", () => {
+      vi.stubEnv("OPERATOR_CONTACT", "");
+      expect(resolverUserAgent()).toBe("UnpackResourceFinder/1.0 (reel-to-resource lookup)");
+    });
+
+    it("strips control characters so a bad value can't inject headers", () => {
+      vi.stubEnv("OPERATOR_CONTACT", "ops@example.com\r\nX-Evil: 1");
+      expect(resolverUserAgent()).not.toMatch(/[\r\n]/);
+    });
   });
 
   it("passes method, headers and body through", async () => {

@@ -5,6 +5,7 @@ import { bookResolver } from "@/lib/pipeline/resolvers/bookResolver";
 import { academicResolver } from "@/lib/pipeline/resolvers/academicResolver";
 import { placesResolver } from "@/lib/pipeline/resolvers/placesResolver";
 import { appStoreResolver } from "@/lib/pipeline/resolvers/appStoreResolver";
+import { wikidataResolver } from "@/lib/pipeline/resolvers/wikidataResolver";
 import { youtubeResolver } from "@/lib/pipeline/resolvers/youtubeResolver";
 import { webSearchResolver } from "@/lib/pipeline/resolvers/webSearchResolver";
 
@@ -21,6 +22,7 @@ export const RESOLVERS: Resolver[] = [
   academicResolver,
   placesResolver,
   appStoreResolver,
+  wikidataResolver,
   youtubeResolver,
   webSearchResolver,
 ];

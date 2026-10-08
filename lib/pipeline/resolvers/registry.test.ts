@@ -26,6 +26,11 @@ describe("resolversFor", () => {
     expect(ids).toContain("npm");
   });
 
+  it("gives tool/site/app pointers a keyless resolver, so they don't depend on a search API key", () => {
+    expect(resolversFor("web_tool").map((r) => r.id)).toEqual(["wikidata", "web_search"]);
+    expect(resolversFor("app_mobile").map((r) => r.id)).toEqual(["itunes", "wikidata", "web_search"]);
+  });
+
   it("ranks the package registry ahead of GitHub for library_package, with web search always last", () => {
     expect(resolversFor("library_package").map((r) => r.id)).toEqual(["npm", "github", "web_search"]);
   });
